@@ -22,8 +22,8 @@ RUN ARCH=$(uname -m); \
 
 WORKDIR /app
 COPY pyproject.toml .
-RUN pip install --no-cache-dir -e .
 COPY src/ src/
+RUN pip install --no-cache-dir -e .
 
 ENV BWS_TIER=read
 EXPOSE 8000
