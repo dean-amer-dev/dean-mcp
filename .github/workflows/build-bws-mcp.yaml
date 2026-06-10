@@ -121,11 +121,8 @@ jobs:
           BRANCH="${PREFIX}/${APP_NAME}-${TAG}"
           git checkout -b "${BRANCH}"
 
-          # Update all three tier deployments
-          for TIER in admin write read; do
-            sed -i "s|amerenda/${APP_NAME}:[^ ]*|amerenda/${APP_NAME}:${TAG}|g" \
-              apps/${APP_NAME}/${TIER}/deployment.yaml
-          done
+          sed -i "s|amerenda/${APP_NAME}:[^ ]*|amerenda/${APP_NAME}:${TAG}|g" \
+            apps/${APP_NAME}/server/deployment.yaml
 
           git config user.name "amerenda-deploy-bot[bot]"
           git config user.email "3192609+amerenda-deploy-bot[bot]@users.noreply.github.com"

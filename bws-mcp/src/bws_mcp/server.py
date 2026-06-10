@@ -1,12 +1,4 @@
-"""bws-mcp: Bitwarden Secrets Manager MCP server with enforced permission tiers.
-
-Tier enforcement is via BWS_TIER env var:
-  read   — get_secret only (no listing, no mutations)
-  write  — get_secret + create/update/delete (app-factory provisioner tier)
-  admin  — all operations including list_secret_names
-
-Each deployment gets its own BWS service account token scoped appropriately.
-"""
+"""bws-mcp: Bitwarden Secrets Manager MCP server."""
 
 from __future__ import annotations
 
@@ -16,20 +8,11 @@ import subprocess
 
 from fastmcp import FastMCP
 
-BWS_TIER = os.environ.get("BWS_TIER", "read")
 _BWS_TOKEN = os.environ.get("BWS_ACCESS_TOKEN", "")
-
-_WRITE_TIERS = {"write", "admin"}
-_ADMIN_TIERS = {"admin"}
 
 mcp = FastMCP(
     "bws-mcp",
-    instructions=(
-        f"Bitwarden Secrets Manager proxy. Current permission tier: {BWS_TIER}. "
-        "read: get secrets by name. "
-        "write: read + create/update/delete. "
-        "admin: write + list all secret names."
-    ),
+    instructions="Bitwarden Secrets Manager proxy. Get, list, create, update, and delete secrets.",
 )
 
 
@@ -59,10 +42,7 @@ def _all_secrets() -> list[dict] | None:
 
 @mcp.tool()
 def get_secret(key: str) -> dict:
-    """Retrieve a secret value by its BWS key name.
-
-    Available to: read, write, admin tiers.
-    """
+    """Retrieve a secret value by its BWS key name."""
     if not _BWS_TOKEN:
         return {"error": "BWS_ACCESS_TOKEN not configured on this server."}
     secrets = _all_secrets()
@@ -76,12 +56,7 @@ def get_secret(key: str) -> dict:
 
 @mcp.tool()
 def list_secret_names() -> dict:
-    """List all BWS secret key names accessible to this service account (no values).
-
-    Available to: admin tier only.
-    """
-    if BWS_TIER not in _ADMIN_TIERS:
-        return {"error": f"list_secret_names requires admin tier. Current: {BWS_TIER}."}
+    """List all BWS secret key names (no values)."""
     secrets = _all_secrets()
     if secrets is None:
         return {"error": "Failed to list secrets from BWS."}
@@ -90,12 +65,7 @@ def list_secret_names() -> dict:
 
 @mcp.tool()
 def create_secret(key: str, value: str, note: str = "") -> dict:
-    """Create a new secret in BWS.
-
-    Available to: write, admin tiers.
-    """
-    if BWS_TIER not in _WRITE_TIERS:
-        return {"error": f"create_secret requires write or admin tier. Current: {BWS_TIER}."}
+    """Create a new secret in BWS."""
     cmd = ["secret", "create", key, value]
     if note:
         cmd += ["--note", note]
@@ -110,12 +80,7 @@ def create_secret(key: str, value: str, note: str = "") -> dict:
 
 @mcp.tool()
 def update_secret(key: str, value: str) -> dict:
-    """Update an existing BWS secret's value by key name.
-
-    Available to: write, admin tiers.
-    """
-    if BWS_TIER not in _WRITE_TIERS:
-        return {"error": f"update_secret requires write or admin tier. Current: {BWS_TIER}."}
+    """Update an existing BWS secret's value by key name."""
     existing = get_secret(key)
     if "error" in existing:
         return existing
@@ -130,12 +95,7 @@ def update_secret(key: str, value: str) -> dict:
 
 @mcp.tool()
 def delete_secret(key: str) -> dict:
-    """Delete a BWS secret by key name.
-
-    Available to: write, admin tiers.
-    """
-    if BWS_TIER not in _WRITE_TIERS:
-        return {"error": f"delete_secret requires write or admin tier. Current: {BWS_TIER}."}
+    """Delete a BWS secret by key name."""
     existing = get_secret(key)
     if "error" in existing:
         return existing
