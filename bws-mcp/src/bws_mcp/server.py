@@ -11,6 +11,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 _BWS_TOKEN = os.environ.get("BWS_ACCESS_TOKEN", "")
+_BWS_PROJECT_ID = os.environ.get("BWS_PROJECT_ID", "")
 
 mcp = FastMCP(
     "bws-mcp",
@@ -73,7 +74,9 @@ def list_secret_names() -> dict:
 @mcp.tool()
 def create_secret(key: str, value: str, note: str = "") -> dict:
     """Create a new secret in BWS."""
-    cmd = ["secret", "create", key, value]
+    if not _BWS_PROJECT_ID:
+        return {"error": "BWS_PROJECT_ID not configured on this server."}
+    cmd = ["secret", "create", key, value, _BWS_PROJECT_ID]
     if note:
         cmd += ["--note", note]
     rc, stdout, stderr = _bws(*cmd)
