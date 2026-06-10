@@ -17,6 +17,7 @@ if [ "${CLONE_REPOS:-false}" = "true" ]; then
   clone_if_missing "$APP_FACTORY_DIR"   "app-factory"
   clone_if_missing "$GITOPS_DIR"        "k3s-dean-gitops"
   clone_if_missing "$KOMODO_DIR"        "komodo-dean-gitops"
+  pip install --quiet -r "$APP_FACTORY_DIR/generate/requirements.txt"
 fi
 
 exec python -m infra_mcp.server "$@"
