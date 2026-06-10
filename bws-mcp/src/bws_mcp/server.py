@@ -7,6 +7,8 @@ import os
 import subprocess
 
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 _BWS_TOKEN = os.environ.get("BWS_ACCESS_TOKEN", "")
 
@@ -14,6 +16,11 @@ mcp = FastMCP(
     "bws-mcp",
     instructions="Bitwarden Secrets Manager proxy. Get, list, create, update, and delete secrets.",
 )
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
 
 
 def _bws(*args: str) -> tuple[int, str, str]:
@@ -109,4 +116,4 @@ def delete_secret(key: str) -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="http", host="0.0.0.0", port=8000, show_banner=False)

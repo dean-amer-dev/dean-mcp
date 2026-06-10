@@ -12,6 +12,8 @@ from typing import Literal
 
 import httpx
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .github_auth import get_installation_token
 from .scaffold import scaffold_stateless_spec, scaffold_stateful_stub
@@ -24,6 +26,12 @@ mcp = FastMCP(
         "Never hardcode secrets — use bws_name references in TOML specs."
     ),
 )
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
 
 APP_FACTORY_DIR = Path(os.environ.get("APP_FACTORY_DIR", "/home/alex/claude/projects/app-factory"))
 GITOPS_DIR = Path(os.environ.get("GITOPS_DIR", "/home/alex/claude/projects/k3s-dean-gitops"))
@@ -328,4 +336,4 @@ def resolve_secret_name(secret_name: str) -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="http", host="0.0.0.0", port=8000, show_banner=False)
