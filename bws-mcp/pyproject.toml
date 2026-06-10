@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bws-mcp"
+version = "0.1.0"
+description = "Bitwarden Secrets Manager MCP server with tiered permission enforcement"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=3.0",
+]
+
+[project.scripts]
+bws-mcp = "bws_mcp.server:mcp.run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bws_mcp"]
