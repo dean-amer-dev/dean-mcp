@@ -16,84 +16,37 @@ env:
   GITOPS_REPO: amerenda/k3s-dean-gitops
 
 jobs:
-  set-tag:
+  build:
+    name: Build and push
     if: github.event_name != 'pull_request'
     runs-on: arc-runner-set
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
-      pr_prefix: ${{ steps.tag.outputs.pr_prefix }}
     steps:
+      - uses: actions/checkout@v4
       - name: Set image tag
         id: tag
-        run: |
-          echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "pr_prefix=deploy" >> "$GITHUB_OUTPUT"
-
-  build-amd64:
-    name: Build amd64
-    needs: [set-tag]
-    if: github.event_name != 'pull_request'
-    runs-on: arc-runner-set
-    env:
-      TAG: ${{ needs.set-tag.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v4
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
       - name: Login to Docker Hub
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-      - name: Build and push (amd64)
+      - name: Build and push
         run: |
-          docker build -t "${IMAGE}:${TAG}-amd64" -f infra-mcp/Dockerfile infra-mcp/
-          docker push "${IMAGE}:${TAG}-amd64"
-
-  build-arm64:
-    name: Build arm64
-    needs: [set-tag]
-    if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, mac-mini]
-    env:
-      TAG: ${{ needs.set-tag.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to Docker Hub
-        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-      - name: Build and push (arm64)
-        run: |
-          docker build -t "${IMAGE}:${TAG}-arm64" -f infra-mcp/Dockerfile infra-mcp/
-          docker push "${IMAGE}:${TAG}-arm64"
-
-  manifest:
-    needs: [set-tag, build-amd64, build-arm64]
-    if: |
-      always() &&
-      needs.build-amd64.result == 'success' &&
-      needs.build-arm64.result == 'success'
-    runs-on: arc-runner-set
-    env:
-      TAG: ${{ needs.set-tag.outputs.tag }}
-    steps:
-      - name: Login to Docker Hub
-        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-      - name: Create multi-arch manifest
-        run: |
-          docker buildx imagetools create -t "${IMAGE}:${TAG}" \
-            "${IMAGE}:${TAG}-amd64" \
-            "${IMAGE}:${TAG}-arm64"
-          docker buildx imagetools create -t "${IMAGE}:latest" \
-            "${IMAGE}:${TAG}-amd64" \
-            "${IMAGE}:${TAG}-arm64"
+          TAG="${{ steps.tag.outputs.tag }}"
+          docker build -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" -f infra-mcp/Dockerfile infra-mcp/
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:latest"
 
   deploy:
-    needs: [set-tag, manifest]
+    needs: [build]
     if: |
       always() &&
-      needs.manifest.result == 'success'
+      needs.build.result == 'success'
     runs-on: arc-runner-set
     steps:
       - uses: actions/checkout@v4
       - name: Create deploy PR
         env:
-          TAG: ${{ needs.set-tag.outputs.tag }}
-          PREFIX: ${{ needs.set-tag.outputs.pr_prefix }}
+          TAG: ${{ needs.build.outputs.tag }}
         run: |
           rm -rf /tmp/gitops
           git clone https://x-access-token:${GITOPS_PAT}@github.com/${GITOPS_REPO}.git /tmp/gitops
@@ -108,7 +61,7 @@ jobs:
           import json,sys
           for pr in json.load(sys.stdin):
               ref = pr.get('head',{}).get('ref','')
-              if ref.startswith('deploy/${APP_NAME}-') or ref.startswith('release/${APP_NAME}-'):
+              if ref.startswith('deploy/${APP_NAME}-'):
                   print(pr['number'])
           " 2>/dev/null || true)
           for PR_NUM in $EXISTING_PRS; do
@@ -118,7 +71,7 @@ jobs:
               -d '{"state":"closed"}' > /dev/null
           done
 
-          BRANCH="${PREFIX}/${APP_NAME}-${TAG}"
+          BRANCH="deploy/${APP_NAME}-${TAG}"
           git checkout -b "${BRANCH}"
 
           sed -i "s|amerenda/${APP_NAME}:[^ ]*|amerenda/${APP_NAME}:${TAG}|g" \
@@ -128,37 +81,27 @@ jobs:
           git config user.email "3192609+amerenda-deploy-bot[bot]@users.noreply.github.com"
           git add -A
           git diff --cached --quiet && exit 0
-          git commit -m "${PREFIX}: ${APP_NAME} ${TAG}"
+          git commit -m "deploy: ${APP_NAME} ${TAG}"
           git push origin "${BRANCH}"
 
           COMMIT_MSG=$(git -C "${GITHUB_WORKSPACE}" log -1 --format='%s' 2>/dev/null || echo "")
           NL=$'\n'
           PR_BODY="**${APP_NAME} ${TAG}**${NL}${NL}${COMMIT_MSG}${NL}${NL}Source: https://github.com/amerenda/dean-mcp/commit/${GITHUB_SHA}"
 
-          PR_RESPONSE=$(curl -s -X POST \
+          curl -s -X POST \
             -H "Authorization: token ${GITOPS_PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
             -d "$(jq -n \
-              --arg title "${PREFIX}: ${APP_NAME} ${TAG}" \
+              --arg title "deploy: ${APP_NAME} ${TAG}" \
               --arg body "${PR_BODY}" \
               --arg head "${BRANCH}" \
               --arg base "main" \
-              '{title: $title, body: $body, head: $head, base: $base}')")
-
-          PR_NUMBER=$(echo "$PR_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['number'])")
-          curl -s -X POST \
-            -H "Authorization: token ${GITOPS_PAT}" \
-            "https://api.github.com/repos/${GITOPS_REPO}/issues/${PR_NUMBER}/labels" \
-            -d '["deploy:'"${APP_NAME}"'"]'
-          curl -s -X POST \
-            -H "Authorization: token ${GITOPS_PAT}" \
-            "https://api.github.com/repos/${GITOPS_REPO}/issues/${PR_NUMBER}/assignees" \
-            -d '{"assignees":["amerenda"]}'
+              '{title: $title, body: $body, head: $head, base: $base}')"
 
   notify-failure:
     if: failure()
-    needs: [build-amd64, build-arm64, manifest, deploy]
+    needs: [build, deploy]
     runs-on: ubuntu-latest
     steps:
       - name: Create GitHub Issue for build failure
