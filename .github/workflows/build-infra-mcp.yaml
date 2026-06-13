@@ -4,11 +4,15 @@ on:
   push:
     branches: [main]
     paths:
+
       - 'infra-mcp/**'
+
   pull_request:
     branches: [main]
     paths:
+
       - 'infra-mcp/**'
+
   workflow_dispatch:
 
 env:
@@ -16,37 +20,75 @@ env:
   GITOPS_REPO: amerenda/k3s-dean-gitops
 
 jobs:
-  build:
-    name: Build and push
+  set-tag:
     if: github.event_name != 'pull_request'
     runs-on: arc-runner-dean-mcp
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
       - name: Set image tag
         id: tag
         run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  build-amd64:
+    needs: set-tag
+    if: github.event_name != 'pull_request'
+    runs-on: arc-runner-dean-mcp
+    steps:
+      - uses: actions/checkout@v4
       - name: Login to Docker Hub
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-      - name: Build and push
+      - name: Build and push (amd64)
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          docker build -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" -f infra-mcp/Dockerfile infra-mcp/
-          docker push "${IMAGE}:${TAG}"
-          docker push "${IMAGE}:latest"
+          TAG="${{ needs.set-tag.outputs.tag }}"
+          docker build -t "${IMAGE}:${TAG}-amd64" -f infra-mcp/Dockerfile infra-mcp
+          docker push "${IMAGE}:${TAG}-amd64"
+
+  build-arm64:
+    needs: set-tag
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, mac-mini]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Docker Hub
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+      - name: Build and push (arm64)
+        run: |
+          TAG="${{ needs.set-tag.outputs.tag }}"
+          docker build -t "${IMAGE}:${TAG}-arm64" -f infra-mcp/Dockerfile infra-mcp
+          docker push "${IMAGE}:${TAG}-arm64"
+
+  manifest:
+    needs: [set-tag, build-amd64, build-arm64]
+    if: github.event_name != 'pull_request'
+    runs-on: arc-runner-dean-mcp
+    outputs:
+      tag: ${{ needs.set-tag.outputs.tag }}
+    steps:
+      - name: Login to Docker Hub
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+      - name: Create multi-arch manifest
+        env:
+          TAG: ${{ needs.set-tag.outputs.tag }}
+        run: |
+          docker buildx imagetools create -t "${IMAGE}:${TAG}" \
+            "${IMAGE}:${TAG}-amd64" \
+            "${IMAGE}:${TAG}-arm64"
+          docker buildx imagetools create -t "${IMAGE}:latest" \
+            "${IMAGE}:${TAG}-amd64" \
+            "${IMAGE}:${TAG}-arm64"
 
   deploy:
-    needs: [build]
+    needs: [manifest]
     if: |
       always() &&
-      needs.build.result == 'success'
+      needs.manifest.result == 'success'
     runs-on: arc-runner-dean-mcp
     steps:
       - uses: actions/checkout@v4
       - name: Create deploy PR
         env:
-          TAG: ${{ needs.build.outputs.tag }}
+          TAG: ${{ needs.manifest.outputs.tag }}
         run: |
           rm -rf /tmp/gitops
           git clone https://x-access-token:${GITOPS_PAT}@github.com/${GITOPS_REPO}.git /tmp/gitops
@@ -75,7 +117,7 @@ jobs:
           git checkout -b "${BRANCH}"
 
           sed -i "s|amerenda/${APP_NAME}:[^ ]*|amerenda/${APP_NAME}:${TAG}|g" \
-            apps/${APP_NAME}/server/deployment.yaml
+            apps/infra-mcp/server/deployment.yaml
 
           git config user.name "amerenda-deploy-bot[bot]"
           git config user.email "3192609+amerenda-deploy-bot[bot]@users.noreply.github.com"
@@ -86,7 +128,7 @@ jobs:
 
           COMMIT_MSG=$(git -C "${GITHUB_WORKSPACE}" log -1 --format='%s' 2>/dev/null || echo "")
           NL=$'\n'
-          PR_BODY="**${APP_NAME} ${TAG}**${NL}${NL}${COMMIT_MSG}${NL}${NL}Source: https://github.com/amerenda/dean-mcp/commit/${GITHUB_SHA}"
+          PR_BODY="**${APP_NAME} ${TAG}** (multi-arch: amd64+arm64)${NL}${NL}${COMMIT_MSG}${NL}${NL}Source: https://github.com/amerenda/dean-mcp/commit/${GITHUB_SHA}"
 
           curl -s -X POST \
             -H "Authorization: token ${GITOPS_PAT}" \
@@ -101,7 +143,7 @@ jobs:
 
   notify-failure:
     if: failure()
-    needs: [build, deploy]
+    needs: [build-amd64, build-arm64, manifest, deploy]
     runs-on: ubuntu-latest
     steps:
       - name: Create GitHub Issue for build failure
