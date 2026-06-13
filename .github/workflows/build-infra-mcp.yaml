@@ -19,7 +19,7 @@ jobs:
   build:
     name: Build and push
     if: github.event_name != 'pull_request'
-    runs-on: arc-runner-set
+    runs-on: arc-runner-dean-mcp
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -41,7 +41,7 @@ jobs:
     if: |
       always() &&
       needs.build.result == 'success'
-    runs-on: arc-runner-set
+    runs-on: arc-runner-dean-mcp
     steps:
       - uses: actions/checkout@v4
       - name: Create deploy PR
