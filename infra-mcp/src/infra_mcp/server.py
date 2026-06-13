@@ -36,6 +36,7 @@ async def health(request: Request) -> JSONResponse:
 APP_FACTORY_DIR = Path(os.environ.get("APP_FACTORY_DIR", "/home/alex/claude/projects/app-factory"))
 GITOPS_DIR = Path(os.environ.get("GITOPS_DIR", "/home/alex/claude/projects/k3s-dean-gitops"))
 KOMODO_DIR = Path(os.environ.get("KOMODO_DIR", "/home/alex/claude/projects/komodo-dean-gitops"))
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://searxng.searxng.svc.cluster.local:8080")
 
 _STATEFUL_KEYWORDS = {
     "gpu", "local storage", "persistent", "stateful", "docker volume",
@@ -339,6 +340,78 @@ def add_mac_mini_runner(name: str, title: str | None = None) -> dict:
         return {"error": "Failed to open PR", "response": pr_resp.text[:500]}
 
     return {"status": "pr_opened", "url": pr_resp.json()["html_url"], "branch": branch}
+
+
+@mcp.tool()
+def searxng_web_search(query: str, max_results: int = 5) -> dict:
+    """Search the web using the local SearXNG instance.
+
+    Returns titles, URLs, and content snippets for each result.
+    Use this for general web research, documentation lookups, and current information.
+
+    Args:
+        query: Search query string.
+        max_results: Maximum number of results to return (default 5, max 10).
+    """
+    max_results = min(max_results, 10)
+    try:
+        resp = httpx.get(
+            f"{SEARXNG_URL}/search",
+            params={"q": query, "format": "json"},
+            timeout=15,
+            headers={"User-Agent": "infra-mcp/1.0"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+    results = data.get("results", [])[:max_results]
+    if not results:
+        return {"results": [], "message": f"No results found for: {query}"}
+
+    formatted = "\n\n".join(
+        f"Title: {r.get('title', '')}\nURL: {r.get('url', '')}\nSnippet: {r.get('content', '')[:300]}"
+        for r in results
+    )
+    return {"count": len(results), "results": results, "formatted": formatted}
+
+
+@mcp.tool()
+def web_url_read(url: str, max_chars: int = 8000) -> dict:
+    """Fetch a URL and return its content as markdown.
+
+    Converts HTML to readable markdown. Useful for reading docs, release notes,
+    GitHub issues, or any web page. Respects max_chars to avoid huge payloads.
+
+    Args:
+        url: Full URL to fetch.
+        max_chars: Max characters of markdown to return (default 8000).
+    """
+    import html2text as _h2t
+    try:
+        resp = httpx.get(
+            url,
+            timeout=15,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; infra-mcp/1.0)"},
+        )
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as e:
+        return {"error": str(e)}
+
+    converter = _h2t.HTML2Text()
+    converter.ignore_images = True
+    converter.ignore_links = False
+    converter.body_width = 0
+    markdown = converter.handle(html)
+
+    truncated = len(markdown) > max_chars
+    if truncated:
+        markdown = markdown[:max_chars] + f"\n\n…[truncated at {max_chars} chars, full length: {len(markdown)}]"
+
+    return {"url": url, "content": markdown, "truncated": truncated}
 
 
 @mcp.tool()
