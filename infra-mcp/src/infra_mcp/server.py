@@ -22,7 +22,7 @@ mcp = FastMCP(
     "infra-mcp",
     instructions=(
         "Provisions stateless (k3s) and stateful (Komodo) services. "
-        "Pattern: scaffold_app → provision_app → open_deploy_pr. "
+        "Full pattern for a new app: scaffold_app → provision_app → open_deploy_pr (k3s) + add_mac_mini_runner (arm64 CI). "
         "Never hardcode secrets — use bws_name references in TOML specs."
     ),
 )
@@ -230,6 +230,110 @@ def open_deploy_pr(name: str, title: str) -> dict:
         timeout=30,
     )
     _run(["git", "checkout", "main"], cwd=GITOPS_DIR)
+
+    if pr_resp.status_code not in (200, 201):
+        return {"error": "Failed to open PR", "response": pr_resp.text[:500]}
+
+    return {"status": "pr_opened", "url": pr_resp.json()["html_url"], "branch": branch}
+
+
+_RUNNERS_COMPOSE = Path("mac-mini-m4/runners/compose.yaml")
+
+_MAC_MINI_RUNNER_TEMPLATE = """\
+
+  runner-{name}:
+    <<: *runner-common
+    container_name: runner-{name}
+    environment:
+      REPO_URL: https://github.com/amerenda/{name}
+      RUNNER_NAME: mini-{name}
+      LABELS: self-hosted,linux,arm64,docker,mac-mini
+"""
+
+
+@mcp.tool()
+def add_mac_mini_runner(name: str, title: str | None = None) -> dict:
+    """Add an arm64 GitHub Actions runner for an app on the mac-mini-m4 (via komodo-dean-gitops).
+
+    Appends a runner service block to mac-mini-m4/runners/compose.yaml and opens a PR.
+    The runner registers with the GitHub repo amerenda/<name> and joins the
+    [self-hosted, linux, arm64, docker, mac-mini] runner group.
+
+    Komodo auto-deploys within 60 seconds of the PR being merged.
+
+    Args:
+        name: App name (must match GitHub repo name under amerenda/).
+        title: Optional PR title override.
+    """
+    app_id = os.environ.get("CODER_APP_ID", "")
+    installation_id = os.environ.get("CODER_INSTALLATION_ID", "")
+    private_key = os.environ.get("CODER_APP_PRIVATE_KEY", "")
+    if not all([app_id, installation_id, private_key]):
+        return {"error": "CODER_APP_ID, CODER_INSTALLATION_ID, CODER_APP_PRIVATE_KEY must all be set."}
+
+    try:
+        token = get_installation_token(app_id, installation_id, private_key)
+    except Exception as e:
+        return {"error": f"GitHub App auth failed: {e}"}
+
+    compose_path = KOMODO_DIR / _RUNNERS_COMPOSE
+    if not compose_path.exists():
+        return {"error": f"Runners compose file not found: {compose_path}"}
+
+    current = compose_path.read_text()
+
+    # Idempotency: don't add if service block already exists.
+    if f"runner-{name}:" in current:
+        return {"status": "already_exists", "message": f"runner-{name} already in runners compose"}
+
+    new_block = _MAC_MINI_RUNNER_TEMPLATE.format(name=name)
+    updated = current.rstrip("\n") + "\n" + new_block
+    compose_path.write_text(updated)
+
+    remote_url = f"https://x-access-token:{token}@github.com/amerenda/komodo-dean-gitops.git"
+    branch = f"feat/runner-{name}-{_short_ts()}"
+    bot_env = {
+        "GIT_AUTHOR_NAME": "amerenda-coder[bot]",
+        "GIT_AUTHOR_EMAIL": "amerenda-coder[bot]@users.noreply.github.com",
+        "GIT_COMMITTER_NAME": "amerenda-coder[bot]",
+        "GIT_COMMITTER_EMAIL": "amerenda-coder[bot]@users.noreply.github.com",
+    }
+    pr_title = title or f"feat(runners): add mac-mini arm64 runner for {name}"
+
+    for cmd, desc in [
+        (["git", "checkout", "-b", branch], "create branch"),
+        (["git", "add", str(_RUNNERS_COMPOSE)], "stage compose"),
+        (["git", "commit", "-m", f"feat(runners): add mac-mini arm64 runner for {name}\n\nAdded by infra-mcp."], "commit"),
+        (["git", "push", remote_url, branch], "push branch"),
+    ]:
+        rc, stdout, stderr = _run(cmd, cwd=KOMODO_DIR, extra_env=bot_env)
+        if rc != 0:
+            compose_path.write_text(current)  # revert the file change
+            _run(["git", "checkout", "main"], cwd=KOMODO_DIR)
+            return {"error": f"git {desc} failed", "stderr": stderr[-500:]}
+
+    pr_resp = httpx.post(
+        "https://api.github.com/repos/amerenda/komodo-dean-gitops/pulls",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={
+            "title": pr_title,
+            "head": branch,
+            "base": "main",
+            "body": (
+                f"Adds arm64 GitHub Actions runner for `{name}` on mac-mini-m4.\n\n"
+                f"Runner name: `mini-{name}`\n"
+                f"Labels: `self-hosted, linux, arm64, docker, mac-mini`\n\n"
+                "Komodo auto-deploys within 60s of merge. "
+                "The runner will register with `amerenda/{name}` on startup."
+            ),
+        },
+        timeout=30,
+    )
+    _run(["git", "checkout", "main"], cwd=KOMODO_DIR)
 
     if pr_resp.status_code not in (200, 201):
         return {"error": "Failed to open PR", "response": pr_resp.text[:500]}
