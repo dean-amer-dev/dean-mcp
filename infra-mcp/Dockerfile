@@ -27,6 +27,18 @@ RUN ARCH=$(uname -m); \
     chmod +x /usr/local/bin/bws && \
     rm /tmp/bws.zip
 
+# kubectl
+RUN ARCH=$(uname -m); \
+    case "$ARCH" in \
+      x86_64)  KUBE_ARCH="amd64" ;; \
+      aarch64) KUBE_ARCH="arm64" ;; \
+      *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
+    esac && \
+    KUBECTL_VERSION=$(curl -fsSL https://dl.k8s.io/release/stable.txt) && \
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBE_ARCH}/kubectl" \
+    -o /usr/local/bin/kubectl && \
+    chmod +x /usr/local/bin/kubectl
+
 WORKDIR /app
 COPY pyproject.toml .
 COPY src/ src/
