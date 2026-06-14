@@ -466,7 +466,7 @@ def get_app_status(
     """
     if app_type == "stateless":
         rc, stdout, _ = _run([
-            "kubectl", "get", "applications", name, "-n", "argocd",
+            "kubectl", "get", "applications", name, "-n", "default",
             "-o", "jsonpath={.status.sync.status},{.status.health.status}",
         ])
         pods_rc, pods_out, _ = _run(["kubectl", "get", "pods", "-n", name, "--no-headers"])
