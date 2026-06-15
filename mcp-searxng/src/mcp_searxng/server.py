@@ -26,8 +26,8 @@ mcp = FastMCP(
     "mcp-searxng",
     instructions=(
         "Optimized web search and URL reading for small-context models. "
-        "searxng_web_search returns scored, deduplicated results — fewer, better hits. "
-        "web_url_read supports read_headings=True (page outline only) and section= (extract one section). "
+        "web_search returns scored, deduplicated results — fewer, better hits. "
+        "url_read supports read_headings=True (page outline only) and section= (extract one section). "
         "Use read_headings first on long docs to locate the right section before fetching full content."
     ),
 )
@@ -60,7 +60,7 @@ def _cache_set(url: str, markdown: str) -> None:
 
 
 @mcp.tool()
-def searxng_web_search(
+def web_search(
     query: str,
     max_results: int = _MAX_RESULTS,
     engines: str | None = None,
@@ -160,7 +160,7 @@ def _extract_section(markdown: str, keyword: str) -> str:
 
 
 @mcp.tool()
-def web_url_read(
+def url_read(
     url: str,
     max_chars: int = _MAX_URL_CHARS,
     read_headings: bool = False,
