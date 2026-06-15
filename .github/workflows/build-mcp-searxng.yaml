@@ -1,0 +1,155 @@
+name: Build mcp-searxng
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mcp-searxng/**'
+
+  pull_request:
+    branches: [main]
+    paths:
+      - 'mcp-searxng/**'
+
+  workflow_dispatch:
+
+env:
+  IMAGE: amerenda/mcp-searxng
+  GITOPS_REPO: amerenda/k3s-dean-gitops
+
+jobs:
+  set-tag:
+    if: github.event_name != 'pull_request'
+    runs-on: arc-runner-dean-mcp
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Set image tag
+        id: tag
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  build-amd64:
+    needs: set-tag
+    if: github.event_name != 'pull_request'
+    runs-on: arc-runner-dean-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Docker Hub
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+      - name: Build and push (amd64)
+        run: |
+          TAG="${{ needs.set-tag.outputs.tag }}"
+          docker build -t "${IMAGE}:${TAG}-amd64" -f mcp-searxng/Dockerfile mcp-searxng
+          docker push "${IMAGE}:${TAG}-amd64"
+
+  build-arm64:
+    needs: set-tag
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, mac-mini]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Docker Hub
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+      - name: Build and push (arm64)
+        run: |
+          TAG="${{ needs.set-tag.outputs.tag }}"
+          docker build -t "${IMAGE}:${TAG}-arm64" -f mcp-searxng/Dockerfile mcp-searxng
+          docker push "${IMAGE}:${TAG}-arm64"
+
+  manifest:
+    needs: [set-tag, build-amd64, build-arm64]
+    if: github.event_name != 'pull_request'
+    runs-on: arc-runner-dean-mcp
+    outputs:
+      tag: ${{ needs.set-tag.outputs.tag }}
+    steps:
+      - name: Login to Docker Hub
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+      - name: Create multi-arch manifest
+        env:
+          TAG: ${{ needs.set-tag.outputs.tag }}
+        run: |
+          docker buildx imagetools create -t "${IMAGE}:${TAG}" \
+            "${IMAGE}:${TAG}-amd64" \
+            "${IMAGE}:${TAG}-arm64"
+          docker buildx imagetools create -t "${IMAGE}:latest" \
+            "${IMAGE}:${TAG}-amd64" \
+            "${IMAGE}:${TAG}-arm64"
+
+  deploy:
+    needs: [manifest]
+    if: |
+      always() &&
+      needs.manifest.result == 'success'
+    runs-on: arc-runner-dean-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create deploy PR
+        env:
+          TAG: ${{ needs.manifest.outputs.tag }}
+        run: |
+          rm -rf /tmp/gitops
+          git clone https://x-access-token:${GITOPS_PAT}@github.com/${GITOPS_REPO}.git /tmp/gitops
+          cd /tmp/gitops
+
+          APP_NAME="mcp-searxng"
+
+          EXISTING_PRS=$(curl -s \
+            -H "Authorization: token ${GITOPS_PAT}" \
+            "https://api.github.com/repos/${GITOPS_REPO}/pulls?state=open&per_page=100" \
+            | python3 -c "
+          import json,sys
+          for pr in json.load(sys.stdin):
+              ref = pr.get('head',{}).get('ref','')
+              if ref.startswith('deploy/${APP_NAME}-'):
+                  print(pr['number'])
+          " 2>/dev/null || true)
+          for PR_NUM in $EXISTING_PRS; do
+            curl -s -X PATCH \
+              -H "Authorization: token ${GITOPS_PAT}" \
+              "https://api.github.com/repos/${GITOPS_REPO}/pulls/${PR_NUM}" \
+              -d '{"state":"closed"}' > /dev/null
+          done
+
+          BRANCH="deploy/${APP_NAME}-${TAG}"
+          git checkout -b "${BRANCH}"
+
+          sed -i "s|amerenda/${APP_NAME}:[^ ]*|amerenda/${APP_NAME}:${TAG}|g" \
+            apps/mcp-searxng/server/deployment.yaml
+
+          git config user.name "amerenda-deploy-bot[bot]"
+          git config user.email "3192609+amerenda-deploy-bot[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "deploy: ${APP_NAME} ${TAG}"
+          git push origin "${BRANCH}"
+
+          COMMIT_MSG=$(git -C "${GITHUB_WORKSPACE}" log -1 --format='%s' 2>/dev/null || echo "")
+          NL=$'\n'
+          PR_BODY="**${APP_NAME} ${TAG}** (multi-arch: amd64+arm64)${NL}${NL}${COMMIT_MSG}${NL}${NL}Source: https://github.com/amerenda/dean-mcp/commit/${GITHUB_SHA}"
+
+          curl -s -X POST \
+            -H "Authorization: token ${GITOPS_PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
+            -d "$(jq -n \
+              --arg title "deploy: ${APP_NAME} ${TAG}" \
+              --arg body "${PR_BODY}" \
+              --arg head "${BRANCH}" \
+              --arg base "main" \
+              '{title: $title, body: $body, head: $head, base: $base}')"
+
+  notify-failure:
+    if: failure()
+    needs: [build-amd64, build-arm64, manifest, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub Issue for build failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "CI failed: ${{ github.workflow }}" \
+            --body "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "ci-failure" || echo "Could not create issue"
