@@ -30,10 +30,7 @@ mcp = FastMCP(
 )
 
 
-def _resolve_repo(repo: str) -> str:
-    """Return 'owner/name' — accepts bare 'name' (uses default org) or 'owner/name'."""
-    return repo if "/" in repo else f"{_DEFAULT_ORG}/{repo}"
-
+_repo_cache: dict[str, str] = {}
 _gh_token_cache: tuple[str, float] | None = None
 
 
@@ -71,6 +68,39 @@ def _gh(path: str, accept: str = "application/vnd.github.v3+json") -> httpx.Resp
         timeout=15,
         follow_redirects=True,
     )
+
+
+def _resolve_repo(repo: str) -> str:
+    """Resolve a bare repo name to 'owner/name'.
+
+    1. 'owner/name' → returned as-is.
+    2. 'name' → tries amerenda/name first.
+    3. If not found, searches GitHub repositories by name and picks the best
+       match (exact name match preferred, then highest stars).
+    Results are cached in-process for the lifetime of the server.
+    """
+    if "/" in repo:
+        return repo
+    if repo in _repo_cache:
+        return _repo_cache[repo]
+
+    # 1. Try default org
+    if _gh(f"/repos/{_DEFAULT_ORG}/{repo}").is_success:
+        _repo_cache[repo] = f"{_DEFAULT_ORG}/{repo}"
+        return _repo_cache[repo]
+
+    # 2. Search GitHub for the most likely repo
+    r = _gh(f"/search/repositories?q={repo}+in:name&per_page=5&sort=stars&order=desc")
+    if r.is_success:
+        items = r.json().get("items", [])
+        if items:
+            exact = [i for i in items if i["name"].lower() == repo.lower()]
+            best = (exact[0] if exact else items[0])["full_name"]
+            _repo_cache[repo] = best
+            return best
+
+    # 3. Fall back — will produce a clear 404 error in the calling tool
+    return f"{_DEFAULT_ORG}/{repo}"
 
 
 @mcp.custom_route("/health", methods=["GET"])
