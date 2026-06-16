@@ -84,18 +84,27 @@ jobs:
     runs-on: arc-runner-dean-mcp
     steps:
       - uses: actions/checkout@v4
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CODER_APP_ID }}
+          private-key: ${{ secrets.CODER_APP_PRIVATE_KEY }}
+          repositories: k3s-dean-gitops
       - name: Create deploy PR
         env:
           TAG: ${{ needs.manifest.outputs.tag }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
+          set -euo pipefail
           rm -rf /tmp/gitops
-          git clone https://x-access-token:${GITOPS_PAT}@github.com/${GITOPS_REPO}.git /tmp/gitops
+          git clone https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git /tmp/gitops
           cd /tmp/gitops
 
           APP_NAME="github-mcp"
 
-          EXISTING_PRS=$(curl -s \
-            -H "Authorization: token ${GITOPS_PAT}" \
+          EXISTING_PRS=$(curl -sf \
+            -H "Authorization: token ${GH_TOKEN}" \
             "https://api.github.com/repos/${GITOPS_REPO}/pulls?state=open&per_page=100" \
             | python3 -c "
           import json,sys
@@ -105,8 +114,8 @@ jobs:
                   print(pr['number'])
           " 2>/dev/null || true)
           for PR_NUM in $EXISTING_PRS; do
-            curl -s -X PATCH \
-              -H "Authorization: token ${GITOPS_PAT}" \
+            curl -sf -X PATCH \
+              -H "Authorization: token ${GH_TOKEN}" \
               "https://api.github.com/repos/${GITOPS_REPO}/pulls/${PR_NUM}" \
               -d '{"state":"closed"}' > /dev/null
           done
@@ -117,8 +126,8 @@ jobs:
           sed -i "s|amerenda/${APP_NAME}:[^ ]*|amerenda/${APP_NAME}:${TAG}|g" \
             apps/github-mcp/server/deployment.yaml
 
-          git config user.name "amerenda-deploy-bot[bot]"
-          git config user.email "3192609+amerenda-deploy-bot[bot]@users.noreply.github.com"
+          git config user.name "amerenda-coder[bot]"
+          git config user.email "amerenda-coder[bot]@users.noreply.github.com"
           git add -A
           git diff --cached --quiet && exit 0
           git commit -m "deploy: ${APP_NAME} ${TAG}"
@@ -128,8 +137,8 @@ jobs:
           NL=$'\n'
           PR_BODY="**${APP_NAME} ${TAG}** (multi-arch: amd64+arm64)${NL}${NL}${COMMIT_MSG}${NL}${NL}Source: https://github.com/amerenda/dean-mcp/commit/${GITHUB_SHA}"
 
-          curl -s -X POST \
-            -H "Authorization: token ${GITOPS_PAT}" \
+          curl -sf -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
             -d "$(jq -n \
