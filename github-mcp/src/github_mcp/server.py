@@ -14,18 +14,25 @@ from starlette.responses import JSONResponse
 _APP_ID = os.environ["GITHUB_APP_ID"]
 _PRIVATE_KEY = os.environ["GITHUB_APP_PRIVATE_KEY"].replace("\\n", "\n")
 _INSTALLATION_ID = os.environ["GITHUB_APP_INSTALLATION_ID"]
-_ORG = os.environ.get("GITHUB_ORG", "amerenda")
+_DEFAULT_ORG = os.environ.get("GITHUB_ORG", "amerenda")
 _MAX_FILE_CHARS = int(os.environ.get("MAX_FILE_CHARS", "32768"))
 
 mcp = FastMCP(
     "github-mcp",
     instructions=(
-        "Read-only GitHub repo browsing for the amerenda org. "
-        "Use list_files to explore a repo directory, read_file to read a specific file "
+        "Read-only GitHub repo browsing. "
+        "The repo parameter accepts 'name' (defaults to the amerenda org) or 'owner/name' "
+        "for any public repo (e.g. 'openai/openai-python'). "
+        "Use get_repo_tree to explore a repo layout, read_file to read a specific file "
         "(capped at 32KB), search_code for symbol/string searches, list_prs for open PRs, "
         "get_pr_diff to review a PR, and list_commits for recent history."
     ),
 )
+
+
+def _resolve_repo(repo: str) -> str:
+    """Return 'owner/name' — accepts bare 'name' (uses default org) or 'owner/name'."""
+    return repo if "/" in repo else f"{_DEFAULT_ORG}/{repo}"
 
 _gh_token_cache: tuple[str, float] | None = None
 
@@ -62,6 +69,7 @@ def _gh(path: str, accept: str = "application/vnd.github.v3+json") -> httpx.Resp
         f"https://api.github.com{path}",
         headers={"Authorization": f"token {_get_installation_token()}", "Accept": accept},
         timeout=15,
+        follow_redirects=True,
     )
 
 
@@ -72,14 +80,15 @@ async def health(request: Request) -> JSONResponse:
 
 @mcp.tool()
 def list_files(repo: str, path: str = "", ref: str = "main") -> dict:
-    """List files and directories at a path in an amerenda org repo.
+    """List files and directories at a path in a GitHub repo.
 
     Args:
-        repo: Repository name (without the org prefix), e.g. 'praetor'.
+        repo: 'name' (amerenda org) or 'owner/name' for any public repo, e.g. 'torvalds/linux'.
         path: Directory path inside the repo, e.g. 'agents/coder'. Empty string = repo root.
         ref: Git ref (branch, tag, or SHA). Defaults to 'main'.
     """
-    url = f"/repos/{_ORG}/{repo}/contents/{path}"
+    full_repo = _resolve_repo(repo)
+    url = f"/repos/{full_repo}/contents/{path}"
     if ref != "main":
         url += f"?ref={ref}"
     resp = _gh(url)
@@ -97,14 +106,15 @@ def list_files(repo: str, path: str = "", ref: str = "main") -> dict:
 
 @mcp.tool()
 def read_file(repo: str, path: str, ref: str = "main") -> dict:
-    """Read a file from an amerenda org repo (response capped at 32KB).
+    """Read a file from a GitHub repo (response capped at 32KB).
 
     Args:
-        repo: Repository name, e.g. 'praetor'.
+        repo: 'name' (amerenda org) or 'owner/name' for any public repo, e.g. 'torvalds/linux'.
         path: File path inside the repo, e.g. 'agents/coder/agent.py'.
         ref: Git ref. Defaults to 'main'.
     """
-    url = f"/repos/{_ORG}/{repo}/contents/{path}"
+    full_repo = _resolve_repo(repo)
+    url = f"/repos/{full_repo}/contents/{path}"
     if ref != "main":
         url += f"?ref={ref}"
     resp = _gh(url)
@@ -127,13 +137,14 @@ def read_file(repo: str, path: str, ref: str = "main") -> dict:
 
 @mcp.tool()
 def search_code(repo: str, query: str) -> dict:
-    """Search for code in an amerenda org repo using GitHub code search.
+    """Search for code in a GitHub repo using GitHub code search.
 
     Args:
-        repo: Repository name, e.g. 'praetor'.
+        repo: 'name' (amerenda org) or 'owner/name' for any public repo.
         query: Search query, e.g. 'def build_agent' or 'hatchet.task'.
     """
-    resp = _gh(f"/search/code?q={query}+repo:{_ORG}/{repo}&per_page=10")
+    full_repo = _resolve_repo(repo)
+    resp = _gh(f"/search/code?q={query}+repo:{full_repo}&per_page=10")
     if not resp.is_success:
         return {"error": resp.text, "status": resp.status_code}
     items = resp.json().get("items", [])
@@ -145,13 +156,14 @@ def search_code(repo: str, query: str) -> dict:
 
 @mcp.tool()
 def list_prs(repo: str, state: str = "open") -> dict:
-    """List pull requests in an amerenda org repo.
+    """List pull requests in a GitHub repo.
 
     Args:
-        repo: Repository name, e.g. 'praetor'.
+        repo: 'name' (amerenda org) or 'owner/name' for any public repo.
         state: 'open', 'closed', or 'all'. Defaults to 'open'.
     """
-    resp = _gh(f"/repos/{_ORG}/{repo}/pulls?state={state}&per_page=20")
+    full_repo = _resolve_repo(repo)
+    resp = _gh(f"/repos/{full_repo}/pulls?state={state}&per_page=20")
     if not resp.is_success:
         return {"error": resp.text, "status": resp.status_code}
     prs = resp.json()
@@ -175,11 +187,12 @@ def get_pr_diff(repo: str, pr_number: int) -> dict:
     """Fetch the unified diff for a pull request (capped at 32KB).
 
     Args:
-        repo: Repository name, e.g. 'praetor'.
+        repo: 'name' (amerenda org) or 'owner/name' for any public repo.
         pr_number: Pull request number.
     """
+    full_repo = _resolve_repo(repo)
     resp = _gh(
-        f"/repos/{_ORG}/{repo}/pulls/{pr_number}",
+        f"/repos/{full_repo}/pulls/{pr_number}",
         accept="application/vnd.github.v3.diff",
     )
     if not resp.is_success:
@@ -194,11 +207,12 @@ def list_commits(repo: str, branch: str = "main", limit: int = 10) -> dict:
     """List recent commits on a branch.
 
     Args:
-        repo: Repository name, e.g. 'praetor'.
+        repo: 'name' (amerenda org) or 'owner/name' for any public repo.
         branch: Branch name. Defaults to 'main'.
         limit: Number of commits to return (max 30). Defaults to 10.
     """
-    resp = _gh(f"/repos/{_ORG}/{repo}/commits?sha={branch}&per_page={min(limit, 30)}")
+    full_repo = _resolve_repo(repo)
+    resp = _gh(f"/repos/{full_repo}/commits?sha={branch}&per_page={min(limit, 30)}")
     if not resp.is_success:
         return {"error": resp.text, "status": resp.status_code}
     commits = resp.json()
@@ -225,15 +239,16 @@ def get_repo_tree(repo: str, path: str = "", ref: str = "main", depth: int = 2) 
     layout in one call instead of repeated list_files calls.
 
     Args:
-        repo: Repository name, e.g. 'praetor'.
+        repo: 'name' (amerenda org) or 'owner/name' for any public repo, e.g. 'open-webui/open-webui'.
         path: Root path to start from. Empty string = repo root.
         ref: Git ref (branch, tag, or SHA). Defaults to 'main'.
         depth: Directory levels to recurse (1–4). Defaults to 2.
     """
     depth = max(1, min(depth, 4))
+    full_repo = _resolve_repo(repo)
 
     def _walk(p: str, remaining: int) -> list[dict]:
-        url = f"/repos/{_ORG}/{repo}/contents/{p}"
+        url = f"/repos/{full_repo}/contents/{p}"
         if ref != "main":
             url += f"?ref={ref}"
         resp = _gh(url)
