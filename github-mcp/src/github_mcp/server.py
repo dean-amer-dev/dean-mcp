@@ -93,7 +93,7 @@ def list_files(repo: str, path: str = "", ref: str = "main") -> dict:
         url += f"?ref={ref}"
     resp = _gh(url)
     if not resp.is_success:
-        return {"error": resp.text, "status": resp.status_code}
+        return {"error": f"{resp.status_code} — repo '{full_repo}' not found or not accessible. Try 'owner/repo' format, e.g. 'open-webui/open-webui'."}
     items = resp.json()
     if isinstance(items, list):
         return {
@@ -119,7 +119,7 @@ def read_file(repo: str, path: str, ref: str = "main") -> dict:
         url += f"?ref={ref}"
     resp = _gh(url)
     if not resp.is_success:
-        return {"error": resp.text, "status": resp.status_code}
+        return {"error": f"{resp.status_code} — '{full_repo}/{path}' not found. If the repo is outside the amerenda org, use 'owner/repo' format."}
     data = resp.json()
     if data.get("encoding") == "base64":
         content = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
@@ -247,12 +247,16 @@ def get_repo_tree(repo: str, path: str = "", ref: str = "main", depth: int = 2) 
     depth = max(1, min(depth, 4))
     full_repo = _resolve_repo(repo)
 
-    def _walk(p: str, remaining: int) -> list[dict]:
+    def _walk(p: str, remaining: int) -> list[dict] | dict:
         url = f"/repos/{full_repo}/contents/{p}"
         if ref != "main":
             url += f"?ref={ref}"
         resp = _gh(url)
         if not resp.is_success:
+            if p == path:
+                # Root-level failure — return an informative error so the model
+                # can retry with 'owner/repo' format instead of silently getting an empty tree.
+                return [{"error": f"{resp.status_code} — repo '{full_repo}' not found or not accessible. Try 'owner/repo' format, e.g. 'open-webui/open-webui'."}]
             return []
         items = resp.json()
         if not isinstance(items, list):
