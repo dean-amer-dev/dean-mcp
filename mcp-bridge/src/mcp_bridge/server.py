@@ -144,14 +144,28 @@ async def call_tool(tool_name: str, request: Request) -> JSONResponse:
         raise HTTPException(status_code=502, detail=str(exc))
 
     # MCP tools/call returns {"content": [{"type": "text", "text": "..."}]}
-    # Unwrap to plain JSON so OpenWebUI can parse the result.
     content = result.get("content", [])
     if content and content[0].get("type") == "text":
         text = content[0]["text"]
         try:
-            return JSONResponse(json.loads(text))
+            parsed = json.loads(text)
         except json.JSONDecodeError:
             return JSONResponse({"result": text})
+
+        # Many tools return {"content": "<file text>", ...metadata...} or
+        # {"diff": "<patch>", ...metadata...}.  Returning the full dict causes
+        # models to loop because they see metadata fields and don't recognise the
+        # response as satisfying their tool call.  Surface the primary text field
+        # directly so the model receives readable content.
+        for key in ("content", "diff"):
+            val = parsed.get(key)
+            if isinstance(val, str) and len(val) > 20:
+                out: dict = {key: val}
+                if parsed.get("truncated"):
+                    out["truncated"] = True
+                return JSONResponse(out)
+
+        return JSONResponse(parsed)
 
     return JSONResponse(result)
 
