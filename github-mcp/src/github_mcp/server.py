@@ -217,5 +217,41 @@ def list_commits(repo: str, branch: str = "main", limit: int = 10) -> dict:
     }
 
 
+@mcp.tool()
+def get_repo_tree(repo: str, path: str = "", ref: str = "main", depth: int = 2) -> dict:
+    """Get the full directory tree of a repo up to the specified depth.
+
+    Use this to explore or 'clone' a repo — returns the complete file/directory
+    layout in one call instead of repeated list_files calls.
+
+    Args:
+        repo: Repository name, e.g. 'praetor'.
+        path: Root path to start from. Empty string = repo root.
+        ref: Git ref (branch, tag, or SHA). Defaults to 'main'.
+        depth: Directory levels to recurse (1–4). Defaults to 2.
+    """
+    depth = max(1, min(depth, 4))
+
+    def _walk(p: str, remaining: int) -> list[dict]:
+        url = f"/repos/{_ORG}/{repo}/contents/{p}"
+        if ref != "main":
+            url += f"?ref={ref}"
+        resp = _gh(url)
+        if not resp.is_success:
+            return []
+        items = resp.json()
+        if not isinstance(items, list):
+            return []
+        result = []
+        for item in items:
+            entry = {"name": item["name"], "type": item["type"], "path": item["path"]}
+            if item["type"] == "dir" and remaining > 1:
+                entry["children"] = _walk(item["path"], remaining - 1)
+            result.append(entry)
+        return result
+
+    return {"repo": repo, "path": path or "/", "ref": ref, "depth": depth, "tree": _walk(path, depth)}
+
+
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000, show_banner=False)

@@ -12,6 +12,7 @@ Read-only GitHub repo browsing MCP server for the `amerenda` org. Exposed to Lit
 | `list_prs` | List pull requests (open/closed/all) |
 | `get_pr_diff` | Fetch unified diff for a PR (capped at 32KB) |
 | `list_commits` | List recent commits on a branch |
+| `get_repo_tree` | Get the full directory tree up to N levels deep — use this to explore or "clone" a repo |
 
 All tools operate on the `amerenda` org by default (overridable via `GITHUB_ORG` env var).
 
