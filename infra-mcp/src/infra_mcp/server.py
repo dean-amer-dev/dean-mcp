@@ -33,12 +33,29 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+def _generate_manifests_only(name: str) -> dict:
+    """Run `make generate` only — no OpenTofu. Used for apps with no database/secrets."""
+    spec_path = APP_FACTORY_DIR / "apps" / f"{name}.toml"
+    if not spec_path.exists():
+        return {"error": f"Spec not found: {spec_path}. Run scaffold_app('{name}', ...) first."}
+    rc, stdout, stderr = _run(
+        ["make", "generate", f"APP={name}", f"GITOPS_DIR={GITOPS_DIR}"],
+        cwd=APP_FACTORY_DIR,
+        timeout=60,
+    )
+    if rc != 0:
+        return {"error": "make generate failed", "stdout": stdout[-2000:], "stderr": stderr[-500:]}
+    generated = [str(p) for p in (GITOPS_DIR / "apps" / name).rglob("*.yaml")]
+    return {"status": "generated", "generated_files": generated}
+
+
 @mcp.custom_route("/app/create", methods=["POST"])
 async def app_create(request: Request) -> JSONResponse:
-    """Full new-app provisioning: scaffold → provision → deploy PR + runner PR.
+    """Full new-app provisioning: scaffold → provision/generate → deploy PR + runner PR.
 
-    Called by praetor webhook-adapter after GitHub repo creation. Runs all four
-    infra-mcp steps sequentially and returns structured results for each step.
+    For apps with no database and no secrets, skips OpenTofu and runs `make generate`
+    directly to avoid shared-state conflicts with other apps. Full provision (OpenTofu)
+    only runs when has_database=true or env_secrets is non-empty.
     """
     import asyncio
 
@@ -51,6 +68,7 @@ async def app_create(request: Request) -> JSONResponse:
     domain = body.get("domain")
     port = int(body.get("port", 8000))
     has_database = bool(body.get("has_database", False))
+    env_secrets = body.get("env_secrets") or {}
 
     results: dict = {"name": name}
 
@@ -64,11 +82,18 @@ async def app_create(request: Request) -> JSONResponse:
             status_code=500,
         )
 
-    provision_result = await asyncio.to_thread(provision_app, name)
-    results["provision"] = provision_result
-    if "error" in provision_result:
+    # Skip OpenTofu for simple stateless apps — shared state causes plan conflicts.
+    if has_database or env_secrets:
+        manifest_result = await asyncio.to_thread(provision_app, name)
+        step = "provision"
+    else:
+        manifest_result = await asyncio.to_thread(_generate_manifests_only, name)
+        step = "generate"
+
+    results[step] = manifest_result
+    if "error" in manifest_result:
         return JSONResponse(
-            {"error": f"provision failed: {provision_result['error']}", **results},
+            {"error": f"{step} failed: {manifest_result['error']}", **results},
             status_code=500,
         )
 
