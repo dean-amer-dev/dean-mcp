@@ -33,6 +33,58 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+@mcp.custom_route("/app/create", methods=["POST"])
+async def app_create(request: Request) -> JSONResponse:
+    """Full new-app provisioning: scaffold → provision → deploy PR + runner PR.
+
+    Called by praetor webhook-adapter after GitHub repo creation. Runs all four
+    infra-mcp steps sequentially and returns structured results for each step.
+    """
+    import asyncio
+
+    body = await request.json()
+    name = body.get("name", "").strip()
+    if not name:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+
+    description = body.get("description") or f"{name} service"
+    domain = body.get("domain")
+    port = int(body.get("port", 8000))
+    has_database = bool(body.get("has_database", False))
+
+    results: dict = {"name": name}
+
+    scaffold_result = await asyncio.to_thread(
+        scaffold_app, name, description, domain, "stateless", port, has_database
+    )
+    results["scaffold"] = scaffold_result
+    if "error" in scaffold_result:
+        return JSONResponse(
+            {"error": f"scaffold failed: {scaffold_result['error']}", **results},
+            status_code=500,
+        )
+
+    provision_result = await asyncio.to_thread(provision_app, name)
+    results["provision"] = provision_result
+    if "error" in provision_result:
+        return JSONResponse(
+            {"error": f"provision failed: {provision_result['error']}", **results},
+            status_code=500,
+        )
+
+    deploy_result = await asyncio.to_thread(open_deploy_pr, name, f"deploy: provision {name}")
+    results["deploy_pr"] = deploy_result
+    if "error" in deploy_result:
+        results["warnings"] = [f"deploy PR failed: {deploy_result['error']}"]
+
+    runner_result = await asyncio.to_thread(add_mac_mini_runner, name)
+    results["runner_pr"] = runner_result
+    if "error" in runner_result:
+        results.setdefault("warnings", []).append(f"runner PR failed: {runner_result['error']}")
+
+    return JSONResponse(results)
+
+
 APP_FACTORY_DIR = Path(os.environ.get("APP_FACTORY_DIR", "/home/alex/claude/projects/app-factory"))
 GITOPS_DIR = Path(os.environ.get("GITOPS_DIR", "/home/alex/claude/projects/k3s-dean-gitops"))
 KOMODO_DIR = Path(os.environ.get("KOMODO_DIR", "/home/alex/claude/projects/komodo-dean-gitops"))
