@@ -69,6 +69,76 @@ def dispatch_praetor_task(title: str, description: str, task_type: str) -> str:
 
 
 @mcp.tool()
+def create_app(
+    name: str,
+    description: str,
+    port: int = 8000,
+    domain: str | None = None,
+    has_database: bool = False,
+    env_secrets: dict | None = None,
+) -> str:
+    """
+    Full app pipeline: create a new GitHub repo, provision k3s manifests, dispatch coder.
+
+    IMPORTANT: Always present a structured plan and wait for explicit user approval
+    before calling this tool. Never call create_app speculatively or without approval.
+
+    What this does:
+    1. Creates a GitHub repo at amerenda/<name> from the app-template skeleton
+    2. Provisions UAT + prod k3s manifests via infra-mcp (ArgoCD-ready before first deploy)
+    3. Adds an arm64 CI runner on mac-mini for the new repo
+    4. Dispatches the coder agent to write the initial implementation and open a PR
+
+    After the coder's PR is merged, CI builds multi-arch images and ArgoCD auto-syncs UAT.
+    A prod deploy PR is created separately for human approval.
+
+    Args:
+        name: App name — lowercase kebab-case (e.g. "my-svc"). Becomes the GitHub repo name.
+        description: What the app does — used as the coder agent's implementation brief.
+        port: Container port (default: 8000).
+        domain: Public domain (default: <name>.amer.dev).
+        has_database: Include PostgreSQL provisioning (default: False).
+        env_secrets: {ENV_VAR: bws-secret-name} for secrets the app needs.
+
+    Returns repo URL and task_id for tracking the coder agent via get_praetor_status.
+    """
+    if not _PRAETOR_API_KEY:
+        return "Error: PRAETOR_API_KEY not configured on this MCP server."
+
+    plan: dict = {
+        "name": name,
+        "description": description,
+        "port": port,
+        "has_database": has_database,
+        "stateless": True,
+    }
+    if domain is not None:
+        plan["domain"] = domain
+    if env_secrets:
+        plan["env_secrets"] = env_secrets
+
+    try:
+        resp = httpx.post(
+            f"{_PRAETOR_BASE}/api/v1/app/create",
+            json=plan,
+            headers=_headers(),
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return (
+            f"App pipeline started!\n"
+            f"Repo: {data['repo_url']}\n"
+            f"task_id: {data['task_id']}\n"
+            f"{data['message']}"
+        )
+    except httpx.HTTPStatusError as exc:
+        return f"Error: create_app failed ({exc.response.status_code}): {exc.response.text[:300]}"
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
 def get_praetor_status(task_id: int) -> str:
     """
     Check the status of a previously dispatched Praetor task.
