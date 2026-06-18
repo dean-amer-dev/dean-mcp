@@ -139,6 +139,58 @@ def create_app(
 
 
 @mcp.tool()
+def request_mcp(capability: str, preferred_name: str | None = None) -> str:
+    """
+    Find or build an MCP server for a requested capability.
+
+    IMPORTANT: Describe the capability clearly in natural language before calling this.
+    The agent will research existing MCP servers and either register a found one or
+    scaffold a new one from scratch.
+
+    Args:
+        capability: Natural language description of what the MCP server should do.
+                    Example: "query Grafana alerts and datasources via the Grafana HTTP API"
+        preferred_name: Optional kebab-case name for the MCP (e.g. "mcp-grafana").
+                        If omitted, a name is derived from the capability or research results.
+
+    Returns a decision ("already_registered", "use_existing", or "scaffold_new"),
+    PR URL or task_id, and a research summary.
+    """
+    if not _PRAETOR_API_KEY:
+        return "Error: PRAETOR_API_KEY not configured on this MCP server."
+
+    body: dict = {"capability": capability}
+    if preferred_name:
+        body["preferred_name"] = preferred_name
+
+    try:
+        resp = httpx.post(
+            f"{_PRAETOR_BASE}/api/v1/mcp/request",
+            json=body,
+            headers=_headers(),
+            timeout=90,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        parts = [
+            f"Decision: {data['decision']}",
+            f"Research: {data['research_summary']}",
+        ]
+        if data.get("pr_url"):
+            parts.append(f"PR: {data['pr_url']}")
+        if data.get("task_id"):
+            parts.append(f"task_id: {data['task_id']} — track at https://hatchet.amer.dev")
+        if data.get("image"):
+            parts.append(f"Image: {data['image']}")
+        parts.append(data["message"])
+        return "\n".join(parts)
+    except httpx.HTTPStatusError as exc:
+        return f"Error: request_mcp failed ({exc.response.status_code}): {exc.response.text[:300]}"
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
 def get_praetor_status(task_id: int) -> str:
     """
     Check the status of a previously dispatched Praetor task.
