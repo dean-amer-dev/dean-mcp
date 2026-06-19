@@ -15,8 +15,8 @@ mcp = FastMCP(
     "praetor-mcp",
     instructions=(
         "Dispatch and monitor Praetor AI agent tasks. "
-        "Use dispatch_praetor_task to start research, code, or pipeline agents. "
-        "Use get_praetor_status to check completion. "
+        "Use dispatch to start research, code, or pipeline agents. "
+        "Use status to check completion. "
         "For code/pipeline tasks, include 'repo: owner/name' in the description."
     ),
 )
@@ -32,7 +32,7 @@ def _headers() -> dict[str, str]:
 
 
 @mcp.tool()
-def dispatch_praetor_task(title: str, description: str, task_type: str) -> str:
+def dispatch(title: str, description: str, task_type: str) -> str:
     """
     Dispatch a Praetor agent task and return its task_id.
 
@@ -43,7 +43,7 @@ def dispatch_praetor_task(title: str, description: str, task_type: str) -> str:
 
     For code or pipeline tasks, include 'repo: owner/name' in description.
 
-    Returns a confirmation string with the task_id. Use get_praetor_status to check completion.
+    Returns a confirmation string with the task_id. Use status to check completion.
     """
     if not _PRAETOR_API_KEY:
         return "Error: PRAETOR_API_KEY not configured on this MCP server."
@@ -139,7 +139,7 @@ def create_app(
 
 
 @mcp.tool()
-def request_mcp(capability: str, preferred_name: str | None = None) -> str:
+def add_mcp(capability: str, preferred_name: str | None = None) -> str:
     """
     Find or build an MCP server for a requested capability.
 
@@ -191,12 +191,12 @@ def request_mcp(capability: str, preferred_name: str | None = None) -> str:
 
 
 @mcp.tool()
-def get_praetor_status(task_id: int) -> str:
+def status(task_id: int) -> str:
     """
     Check the status of a previously dispatched Praetor task.
 
     Returns whether the task is done and a summary from Mem0 if available.
-    Call dispatch_praetor_task first to get a task_id.
+    Call dispatch first to get a task_id.
     """
     if not _PRAETOR_API_KEY:
         return "Error: PRAETOR_API_KEY not configured on this MCP server."
