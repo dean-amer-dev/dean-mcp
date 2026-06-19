@@ -23,9 +23,9 @@ mcp = FastMCP(
         "Read-only GitHub repo browsing. "
         "The repo parameter accepts 'name' (defaults to the amerenda org) or 'owner/name' "
         "for any public repo (e.g. 'openai/openai-python'). "
-        "Use get_repo_tree to explore a repo layout, read_file to read a specific file "
-        "(capped at 32KB), search_code for symbol/string searches, list_prs for open PRs, "
-        "get_pr_diff to review a PR, and list_commits for recent history."
+        "Use tree to explore a repo layout, read to read a specific file "
+        "(capped at 32KB), search for symbol/string searches, prs for open PRs, "
+        "pr_diff to review a PR, and commits for recent history."
     ),
 )
 
@@ -109,7 +109,7 @@ async def health(request: Request) -> JSONResponse:
 
 
 @mcp.tool()
-def list_files(repo: str, path: str = "", ref: str = "main") -> dict:
+def ls(repo: str, path: str = "", ref: str = "main") -> dict:
     """List files and directories at a path in a GitHub repo.
 
     Args:
@@ -135,7 +135,7 @@ def list_files(repo: str, path: str = "", ref: str = "main") -> dict:
 
 
 @mcp.tool()
-def read_file(repo: str, path: str, ref: str = "main") -> dict:
+def read(repo: str, path: str, ref: str = "main") -> dict:
     """Read a file from a GitHub repo (response capped at 32KB).
 
     Args:
@@ -166,7 +166,7 @@ def read_file(repo: str, path: str, ref: str = "main") -> dict:
 
 
 @mcp.tool()
-def search_code(repo: str, query: str) -> dict:
+def search(repo: str, query: str) -> dict:
     """Search for code in a GitHub repo using GitHub code search.
 
     Args:
@@ -185,7 +185,7 @@ def search_code(repo: str, query: str) -> dict:
 
 
 @mcp.tool()
-def list_prs(repo: str, state: str = "open") -> dict:
+def prs(repo: str, state: str = "open") -> dict:
     """List pull requests in a GitHub repo.
 
     Args:
@@ -213,7 +213,7 @@ def list_prs(repo: str, state: str = "open") -> dict:
 
 
 @mcp.tool()
-def get_pr_diff(repo: str, pr_number: int) -> dict:
+def pr_diff(repo: str, pr_number: int) -> dict:
     """Fetch the unified diff for a pull request (capped at 32KB).
 
     Args:
@@ -233,7 +233,7 @@ def get_pr_diff(repo: str, pr_number: int) -> dict:
 
 
 @mcp.tool()
-def list_commits(repo: str, branch: str = "main", limit: int = 10) -> dict:
+def commits(repo: str, branch: str = "main", limit: int = 10) -> dict:
     """List recent commits on a branch.
 
     Args:
@@ -262,7 +262,7 @@ def list_commits(repo: str, branch: str = "main", limit: int = 10) -> dict:
 
 
 @mcp.tool()
-def get_repo_tree(repo: str, path: str = "", ref: str = "main", depth: int = 2) -> dict:
+def tree(repo: str, path: str = "", ref: str = "main", depth: int = 2) -> dict:
     """Get the full directory tree of a repo up to the specified depth.
 
     Use this to explore or 'clone' a repo — returns the complete file/directory
