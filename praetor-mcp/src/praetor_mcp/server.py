@@ -217,5 +217,60 @@ def status(task_id: int) -> str:
         return f"Error: {exc}"
 
 
+@mcp.tool()
+def create_agent(
+    name: str,
+    description: str,
+    event: str,
+    tools: list[str] | None = None,
+    include_coder_creds: bool = False,
+) -> str:
+    """
+    Create and deploy a new Hatchet agent. Blocks ~5 min until live.
+
+    IMPORTANT: Present a plan and get explicit approval before calling.
+    No pre-provisioning required — all secrets are shared across workers.
+
+    Args:
+        name: lowercase kebab-case, e.g. "grafana-monitor"
+        description: what the agent does (drives codegen and Langfuse prompt)
+        event: Hatchet event name, e.g. "agent:grafana-monitor"
+        tools: ["search_memory", "add_memory", "web_search"]
+        include_coder_creds: True if agent needs to push code via GitHub App
+    """
+    if not _PRAETOR_API_KEY:
+        return "Error: PRAETOR_API_KEY not configured."
+    body: dict = {"name": name, "description": description, "event": event}
+    if tools:
+        body["tools"] = tools
+    if include_coder_creds:
+        body["include_coder_creds"] = True
+    try:
+        resp = httpx.post(
+            f"{_PRAETOR_BASE}/api/v1/agent/create",
+            json=body,
+            headers=_headers(),
+            timeout=360,
+        )
+        resp.raise_for_status()
+        d = resp.json()
+        lines = [f"Status: {d['status']}", f"Agent: {d['agent']} | Event: {d['event']}"]
+        if d.get("scaffold_pr_url"):
+            lines.append(f"Scaffold PR: {d['scaffold_pr_url']}")
+        if d.get("manifest_pr_url"):
+            lines.append(f"Manifest PR: {d['manifest_pr_url']}")
+        if d.get("langfuse_prompt"):
+            lines.append(f"Prompt: langfuse.amer.dev → {d['langfuse_prompt']}")
+        lines.append(f"Pod: {d.get('pod_status')} | Smoke: {d.get('smoke_test')}")
+        lines.append(d["message"])
+        return "\n".join(lines)
+    except httpx.HTTPStatusError as exc:
+        return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
+    except httpx.TimeoutException:
+        return "Timed out. Check praetor logs and hatchet.amer.dev for progress."
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000, show_banner=False)
