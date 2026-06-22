@@ -1,9 +1,12 @@
 """praetor-mcp: dispatch Praetor agents from any MCP-aware client."""
 from __future__ import annotations
 
+import logging
 import os
 
 import httpx
+
+_logger = logging.getLogger(__name__)
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -269,6 +272,7 @@ def create_agent(
     except httpx.TimeoutException:
         return "Timed out. Check praetor logs and hatchet.amer.dev for progress."
     except Exception as exc:
+        _logger.exception("create_agent unexpected error")
         return f"Error: {exc}"
 
 
