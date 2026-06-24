@@ -277,5 +277,69 @@ def create_agent(
         return f"Error: {exc}"
 
 
+@mcp.tool()
+def memory_search(query: str) -> str:
+    """
+    Search the planner-global Mem0 namespace for context relevant to a planning query.
+
+    Use this BEFORE asking the user clarifying questions — if results contain the
+    answer (which repo, which stack, prior decisions), skip that question.
+
+    Returns bullet points of relevant memory entries, or "No results found."
+    """
+    if not _PRAETOR_API_KEY:
+        return "Error: PRAETOR_API_KEY not configured on this MCP server."
+    try:
+        resp = httpx.post(
+            f"{_PRAETOR_BASE}/api/v1/memory/search",
+            json={"query": query},
+            headers=_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if not results:
+            return "No results found."
+        return "\n".join(f"- {r}" for r in results)
+    except httpx.HTTPStatusError as exc:
+        return f"Error: memory search failed ({exc.response.status_code}): {exc.response.text[:200]}"
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
+def execute_spec(spec_toml: str) -> str:
+    """
+    Execute a user-approved TOML spec — dispatch the appropriate Praetor agent.
+
+    IMPORTANT: NEVER call this without explicit user approval of the spec.
+    Present the spec as a toml code block and wait for the user to say
+    "yes", "go", "looks good", "ship it", or similar before calling.
+
+    spec_toml: the raw TOML content from the approved spec block (no fences).
+
+    Returns task_id and routing information. Use status() to check progress.
+    """
+    if not _PRAETOR_API_KEY:
+        return "Error: PRAETOR_API_KEY not configured on this MCP server."
+    try:
+        resp = httpx.post(
+            f"{_PRAETOR_BASE}/api/v1/spec/execute",
+            json={"spec_toml": spec_toml},
+            headers=_headers(),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return (
+            f"Dispatched via {data['routing']} — task_id={data['task_id']}, "
+            f"event={data['event']}. View run at {data['hatchet_url']}"
+        )
+    except httpx.HTTPStatusError as exc:
+        return f"Error: spec execution failed ({exc.response.status_code}): {exc.response.text[:300]}"
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000, show_banner=False)
