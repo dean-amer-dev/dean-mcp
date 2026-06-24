@@ -18,9 +18,9 @@ mcp = FastMCP(
     "praetor-mcp",
     instructions=(
         "Dispatch and monitor Praetor AI agent tasks. "
-        "Use dispatch to start research, code, or pipeline agents. "
+        "Use dispatch to start research, code, pipeline, or openhands agents. "
         "Use status to check completion. "
-        "For code/pipeline tasks, include 'repo: owner/name' in the description."
+        "For code/pipeline/openhands tasks, include 'repo: owner/name' in the description."
     ),
 )
 
@@ -39,19 +39,20 @@ def dispatch(title: str, description: str, task_type: str) -> str:
     """
     Dispatch a Praetor agent task and return its task_id.
 
-    task_type must be one of: research | code | pipeline
+    task_type must be one of: research | code | pipeline | openhands
     - research: web search + summarise, output written to Mem0
-    - code: read a repo, implement changes, open a PR
+    - code: read a repo, implement changes, open a PR (uses Claude Code coder agent)
     - pipeline: research first, then code (both labels)
+    - openhands: send to OpenHands autonomous coding agent (alternative to code type)
 
-    For code or pipeline tasks, include 'repo: owner/name' in description.
+    For code, pipeline, or openhands tasks, include 'repo: owner/name' in description.
 
     Returns a confirmation string with the task_id. Use status to check completion.
     """
     if not _PRAETOR_API_KEY:
         return "Error: PRAETOR_API_KEY not configured on this MCP server."
-    if task_type not in ("research", "code", "pipeline"):
-        return f"Error: task_type must be research, code, or pipeline — got '{task_type}'"
+    if task_type not in ("research", "code", "pipeline", "openhands"):
+        return f"Error: task_type must be research, code, pipeline, or openhands — got '{task_type}'"
     try:
         resp = httpx.post(
             f"{_PRAETOR_BASE}/api/v1/dispatch",
