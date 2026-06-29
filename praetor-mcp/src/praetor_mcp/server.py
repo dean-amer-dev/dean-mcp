@@ -349,14 +349,16 @@ def model_switch(model: str) -> str:
     """
     Switch the active LLM model on murderbot.
 
-    Restarts the llama-server container with a different GGUF. The server takes
-    2–5 minutes to load; all LiteLLM routes pointing to murderbot share the active model.
+    Restarts the llama-server container with a different GGUF and BLOCKS until
+    the server is ready (up to 5 minutes). Returns "ready" when the new model
+    is loaded and accepting requests, or "timeout" if it didn't come up in time.
 
     Available models:
     - qwen3-35b          Main model (Unsloth Dynamic Q4_K_XL, thinking off by default)
     - qwen36-unrestricted  Abliterated Qwen3.6 (Heretic v1.3.0, MTP-preserved, Q4_K_M)
 
     Note: only one model runs at a time — switching stops the current model.
+    All LiteLLM routes pointing to murderbot share the active model.
     """
     if not _PRAETOR_API_KEY:
         return "Error: PRAETOR_API_KEY not configured on this MCP server."
@@ -367,15 +369,16 @@ def model_switch(model: str) -> str:
             f"{_PRAETOR_BASE}/api/v1/model/switch",
             json={"model": model},
             headers=_headers(),
-            timeout=30,
+            timeout=380,
         )
         resp.raise_for_status()
         data = resp.json()
-        return (
-            f"Model switch initiated → {data['model']}\n"
-            f"{data['message']}\n"
-            f"qwen3-35b and qwen3-35b-think will serve {model} once ready."
-        )
+        status = data.get("status", "unknown")
+        if status == "ready":
+            return f"Model switched and ready: {data['model']}"
+        if status == "timeout":
+            return f"Model {data['model']} started but did not become healthy within 5 minutes. Check :8088/health manually."
+        return f"Model switch status={status}: {data.get('message', '')}"
     except httpx.HTTPStatusError as exc:
         return f"Error: model switch failed ({exc.response.status_code}): {exc.response.text[:200]}"
     except Exception as exc:
