@@ -147,15 +147,23 @@ def add_mcp(capability: str, preferred_name: str | None = None) -> str:
     """
     Find or build an MCP server for a requested capability.
 
-    IMPORTANT: Describe the capability clearly in natural language before calling this.
-    The agent will research existing MCP servers and either register a found one or
-    scaffold a new one from scratch.
+    IMPORTANT: NEVER call this without explicit user approval. Follow this flow every time:
+    1. Ask 2-3 clarifying questions: what system does it connect to? what operations
+       should it support (read-only diagnostics, or also write/control)? any auth needed?
+    2. Based on the answers, list the specific tools the MCP will expose
+       (e.g. "get_entity_state, list_recent_events, get_error_log, call_service")
+    3. Present a short capability summary and proposed tool list to the user
+    4. Wait for explicit confirmation ("yes", "looks good", "go ahead") before calling.
+
+    Do NOT call speculatively. Do NOT skip the approval step even for simple requests.
 
     Args:
-        capability: Natural language description of what the MCP server should do.
-                    Example: "query Grafana alerts and datasources via the Grafana HTTP API"
-        preferred_name: Optional kebab-case name for the MCP (e.g. "mcp-grafana").
-                        If omitted, a name is derived from the capability or research results.
+        capability: Natural language description of what the MCP server should do,
+                    written AFTER the user has confirmed the plan. Should include the
+                    specific tools/operations agreed on in the planning conversation.
+                    Example: "Query Home Assistant: read entity states, list recent events,
+                    fetch the error log, and call services for diagnostics"
+        preferred_name: Optional kebab-case name (e.g. "mcp-homeassistant").
 
     Returns a decision ("already_registered", "use_existing", or "scaffold_new"),
     PR URL or task_id, and a research summary.
