@@ -316,6 +316,71 @@ def memory_search(query: str) -> str:
 
 
 @mcp.tool()
+def memory_add(content: str) -> str:
+    """
+    Save a fact or recommendation to the planner-global Mem0 namespace.
+
+    Use this AFTER completing a shopping recommendation to record the category,
+    Best Pick product + price, Runner-Up + price, Budget Pick + price, and key
+    failure modes found. Also use for any other information worth preserving
+    across conversations.
+
+    content: The information to store (plain text, 1-3 sentences max).
+
+    Returns "stored" on success, or an error message.
+    """
+    if not _PRAETOR_API_KEY:
+        return "Error: PRAETOR_API_KEY not configured on this MCP server."
+    try:
+        resp = httpx.post(
+            f"{_PRAETOR_BASE}/api/v1/memory/add",
+            json={"content": content},
+            headers=_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return "stored"
+    except httpx.HTTPStatusError as exc:
+        return f"Error: memory add failed ({exc.response.status_code}): {exc.response.text[:200]}"
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
+def memory_delete(query: str) -> str:
+    """
+    Delete memories from the planner-global Mem0 namespace matching a query.
+
+    Use this when the user says "remove this from memory", "forget [topic]",
+    or "that recommendation is outdated". Searches for memories matching the
+    query and deletes them.
+
+    query: The topic or content to find and delete (e.g. "coffee maker recommendations").
+
+    Returns a count of deleted entries or "No matching memories found."
+    """
+    if not _PRAETOR_API_KEY:
+        return "Error: PRAETOR_API_KEY not configured on this MCP server."
+    try:
+        resp = httpx.post(
+            f"{_PRAETOR_BASE}/api/v1/memory/delete",
+            json={"query": query},
+            headers=_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        count = data.get("deleted", 0)
+        if count == 0:
+            return "No matching memories found."
+        return f"Deleted {count} memory entr{'y' if count == 1 else 'ies'}."
+    except httpx.HTTPStatusError as exc:
+        return f"Error: memory delete failed ({exc.response.status_code}): {exc.response.text[:200]}"
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
 def execute_spec(spec_toml: str) -> str:
     """
     Execute a user-approved TOML spec — dispatch the appropriate Praetor agent.
