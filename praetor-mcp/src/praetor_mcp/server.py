@@ -247,7 +247,7 @@ def create_agent(
         name: lowercase kebab-case, e.g. "grafana-monitor"
         description: what the agent does (drives codegen and Langfuse prompt)
         event: Hatchet event name, e.g. "agent:grafana-monitor"
-        tools: ["search_memory", "add_memory", "web_search"]
+        tools: ["search_memory", "add_memory", "searxng_search"]
         include_coder_creds: True if agent needs to push code via GitHub App
     """
     if not _PRAETOR_API_KEY:
