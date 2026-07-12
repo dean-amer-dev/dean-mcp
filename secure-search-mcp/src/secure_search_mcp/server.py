@@ -13,7 +13,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://searxng.searxng.svc.cluster.local:8080")
-_GLUETUN_URL = os.environ.get("GLUETUN_CONTROL_URL", "http://localhost:9999")
+# Internal gluetun health server — loopback, no auth required, 200=up / non-200=down.
+# All containers in the pod share the same network namespace so 127.0.0.1:9999 is reachable.
+_GLUETUN_HEALTH_URL = os.environ.get("GLUETUN_HEALTH_URL", "http://127.0.0.1:9999")
 _MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "5"))
 _MAX_SNIPPET = int(os.environ.get("MAX_CONTENT_CHARS", "600"))
 _MAX_URL_CHARS = int(os.environ.get("MAX_URL_CONTENT_CHARS", "4000"))
@@ -22,9 +24,8 @@ _url_cache: dict[str, tuple[float, str]] = {}
 _CACHE_TTL = 300
 _CACHE_MAX = 50
 
-# Dedicated client for gluetun control API — short timeout, no retries.
-# If VPN is unreachable, we block immediately.
-_gluetun = httpx.Client(base_url=_GLUETUN_URL, timeout=5.0)
+# Short timeout — if health server is unreachable, block immediately.
+_gluetun = httpx.Client(base_url=_GLUETUN_HEALTH_URL, timeout=5.0)
 
 mcp = FastMCP(
     "secure-search-mcp",
@@ -41,29 +42,23 @@ mcp = FastMCP(
 # ── VPN enforcement ────────────────────────────────────────────────────────────
 
 def _require_vpn() -> None:
-    """SECURITY GATE: Hard VPN verification before any external request.
+    """SECURITY GATE: Hard VPN verification via gluetun's internal health server.
 
-    Calls gluetun's control API to confirm the NordVPN tunnel is active.
-    Raises RuntimeError if the VPN is down, unreachable, or in any state
-    other than 'running'. There is no bypass — this runs on every tool call.
+    Uses http://127.0.0.1:9999 — loopback shared across all containers in the pod,
+    no authentication required. gluetun returns 200 when the VPN tunnel is active
+    and non-200 when down. Any failure (non-200 or connection error) hard-blocks
+    the request. There is no bypass — this runs on every tool call.
     """
     try:
-        resp = _gluetun.get("/v1/openvpn/status")
-        resp.raise_for_status()
-        status = resp.json().get("status", "unknown")
-        if status != "running":
+        resp = _gluetun.get("/")
+        if not resp.is_success:
             raise RuntimeError(
-                f"VPN gate blocked: NordVPN not connected (gluetun status={status!r}). "
-                "All external requests are blocked until the VPN tunnel is established."
+                f"VPN gate blocked: gluetun health check returned HTTP {resp.status_code}. "
+                "NordVPN tunnel is not established — all requests blocked."
             )
-    except httpx.HTTPStatusError as e:
-        raise RuntimeError(
-            f"VPN gate blocked: gluetun control API returned HTTP {e.response.status_code}. "
-            "Cannot confirm VPN state — request blocked for safety."
-        ) from e
     except httpx.RequestError as e:
         raise RuntimeError(
-            f"VPN gate blocked: cannot reach gluetun controller at {_GLUETUN_URL} ({e}). "
+            f"VPN gate blocked: cannot reach gluetun health server at {_GLUETUN_HEALTH_URL} ({e}). "
             "Request hard-blocked — VPN state unverifiable."
         ) from e
 
@@ -73,8 +68,8 @@ def _require_vpn() -> None:
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> JSONResponse:
     try:
-        resp = _gluetun.get("/v1/openvpn/status")
-        vpn_status = resp.json().get("status", "unknown") if resp.is_success else "unreachable"
+        resp = _gluetun.get("/")
+        vpn_status = "running" if resp.is_success else f"down (HTTP {resp.status_code})"
     except Exception:
         vpn_status = "unreachable"
     return JSONResponse({"status": "ok", "vpn": vpn_status})
