@@ -28,8 +28,17 @@ jobs:
         id: tag
         run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+  test:
+    runs-on: arc-runner-dean-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run VPN gate tests
+        run: |
+          docker build -t secure-search-mcp-test -f secure-search-mcp/Dockerfile.test secure-search-mcp
+          docker run --rm secure-search-mcp-test
+
   build:
-    needs: set-tag
+    needs: [set-tag, test]
     if: github.event_name != 'pull_request'
     runs-on: arc-runner-dean-mcp
     outputs:
