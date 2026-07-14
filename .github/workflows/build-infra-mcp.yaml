@@ -4,15 +4,13 @@ on:
   push:
     branches: [main]
     paths:
-
       - 'infra-mcp/**'
-
+      - '.github/workflows/build-infra-mcp.yaml'
   pull_request:
     branches: [main]
     paths:
-
       - 'infra-mcp/**'
-
+      - '.github/workflows/build-infra-mcp.yaml'
   workflow_dispatch:
 
 env:
@@ -30,59 +28,38 @@ jobs:
         id: tag
         run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-  build-amd64:
+  build:
     needs: set-tag
-    if: github.event_name != 'pull_request'
-    runs-on: arc-runner-dean-mcp
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to Docker Hub
-        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-      - name: Build and push (amd64)
-        run: |
-          TAG="${{ needs.set-tag.outputs.tag }}"
-          docker build -t "${IMAGE}:${TAG}-amd64" -f infra-mcp/Dockerfile infra-mcp
-          docker push "${IMAGE}:${TAG}-amd64"
-
-  build-arm64:
-    needs: set-tag
-    if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, mac-mini]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to Docker Hub
-        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-      - name: Build and push (arm64)
-        run: |
-          TAG="${{ needs.set-tag.outputs.tag }}"
-          docker build -t "${IMAGE}:${TAG}-arm64" -f infra-mcp/Dockerfile infra-mcp
-          docker push "${IMAGE}:${TAG}-arm64"
-
-  manifest:
-    needs: [set-tag, build-amd64, build-arm64]
     if: github.event_name != 'pull_request'
     runs-on: arc-runner-dean-mcp
     outputs:
       tag: ${{ needs.set-tag.outputs.tag }}
     steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Login to Docker Hub
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-      - name: Create multi-arch manifest
-        env:
-          TAG: ${{ needs.set-tag.outputs.tag }}
-        run: |
-          docker buildx imagetools create -t "${IMAGE}:${TAG}" \
-            "${IMAGE}:${TAG}-amd64" \
-            "${IMAGE}:${TAG}-arm64"
-          docker buildx imagetools create -t "${IMAGE}:latest" \
-            "${IMAGE}:${TAG}-amd64" \
-            "${IMAGE}:${TAG}-arm64"
+      - name: Build and push (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./infra-mcp
+          file: ./infra-mcp/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ needs.set-tag.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha,scope=infra-mcp
+          cache-to: type=gha,mode=max,scope=infra-mcp
 
   deploy:
-    needs: [manifest]
+    needs: [build]
     if: |
       always() &&
-      needs.manifest.result == 'success'
+      needs.build.result == 'success'
     runs-on: arc-runner-dean-mcp
     steps:
       - uses: actions/checkout@v4
@@ -95,7 +72,7 @@ jobs:
           repositories: k3s-dean-gitops
       - name: Create deploy PR
         env:
-          TAG: ${{ needs.manifest.outputs.tag }}
+          TAG: ${{ needs.build.outputs.tag }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
@@ -150,17 +127,3 @@ jobs:
               --arg base "main" \
               '{title: $title, body: $body, head: $head, base: $base}')"
 
-  notify-failure:
-    if: failure()
-    needs: [build-amd64, build-arm64, manifest, deploy]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Create GitHub Issue for build failure
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh issue create \
-            --repo "${{ github.repository }}" \
-            --title "CI failed: ${{ github.workflow }}" \
-            --body "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --label "ci-failure" || echo "Could not create issue"
