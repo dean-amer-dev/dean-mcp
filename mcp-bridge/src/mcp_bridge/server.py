@@ -22,11 +22,20 @@ logger = logging.getLogger(__name__)
 LITELLM_MCP_URL = os.environ.get("LITELLM_MCP_URL", "https://litellm.amer.dev/mcp")
 LITELLM_API_KEY = os.environ["LITELLM_API_KEY"]
 
+# LiteLLM's stateless POST /mcp/tools/list endpoint always returns zero tools —
+# the gateway only serves tools over the stateful MCP session protocol: an
+# `initialize` call against the root endpoint returns an `mcp-session-id`
+# header, which must then be sent on every subsequent request.
+MCP_ENDPOINT = LITELLM_MCP_URL.rstrip("/") + "/"
+
 app = FastAPI(title="MCP Bridge", version="1.0.0", docs_url=None, redoc_url=None)
 router = APIRouter(prefix="/mcp")
 
 _tools: dict[str, dict] = {}
 _lock = asyncio.Lock()
+
+_session_id: str | None = None
+_session_lock = asyncio.Lock()
 
 
 def _parse_sse(text: str) -> dict:
@@ -44,20 +53,71 @@ def _parse_sse(text: str) -> dict:
     raise RuntimeError("No result found in MCP SSE response")
 
 
+def _headers(session_id: str | None) -> dict:
+    headers = {
+        "Authorization": f"Bearer {LITELLM_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if session_id:
+        headers["mcp-session-id"] = session_id
+    return headers
+
+
+async def _initialize_session(client: httpx.AsyncClient) -> str:
+    resp = await client.post(
+        MCP_ENDPOINT,
+        headers=_headers(None),
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "mcp-bridge", "version": "1.0.0"},
+            },
+        },
+    )
+    resp.raise_for_status()
+    session_id = resp.headers.get("mcp-session-id")
+    if not session_id:
+        raise RuntimeError("MCP initialize did not return mcp-session-id")
+    return session_id
+
+
+async def _mcp_call(client: httpx.AsyncClient, method: str, params: dict) -> dict:
+    """Call the stateful MCP endpoint, initializing or re-initializing the session as needed."""
+    global _session_id
+
+    async with _session_lock:
+        if _session_id is None:
+            _session_id = await _initialize_session(client)
+        session_id = _session_id
+
+    resp = await client.post(
+        MCP_ENDPOINT,
+        headers=_headers(session_id),
+        json={"jsonrpc": "2.0", "id": 2, "method": method, "params": params},
+    )
+    if resp.status_code in (400, 404):
+        # Session likely expired — re-initialize once and retry.
+        async with _session_lock:
+            _session_id = await _initialize_session(client)
+            session_id = _session_id
+        resp = await client.post(
+            MCP_ENDPOINT,
+            headers=_headers(session_id),
+            json={"jsonrpc": "2.0", "id": 2, "method": method, "params": params},
+        )
+    resp.raise_for_status()
+    return _parse_sse(resp.text)
+
+
 async def _refresh_tools() -> None:
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{LITELLM_MCP_URL}/tools/list",
-            headers={
-                "Authorization": f"Bearer {LITELLM_API_KEY}",
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-        )
-        resp.raise_for_status()
+        result = await _mcp_call(client, "tools/list", {})
 
-    result = _parse_sse(resp.text)
     async with _lock:
         _tools.clear()
         for tool in result.get("tools", []):
@@ -121,25 +181,11 @@ async def call_tool(tool_name: str, request: Request) -> JSONResponse:
 
     body = await request.json()
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            f"{LITELLM_MCP_URL}/tools/call",
-            headers={
-                "Authorization": f"Bearer {LITELLM_API_KEY}",
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {"name": tool_name, "arguments": body},
-            },
-        )
-        resp.raise_for_status()
-
     try:
-        result = _parse_sse(resp.text)
+        async with httpx.AsyncClient(timeout=60) as client:
+            result = await _mcp_call(
+                client, "tools/call", {"name": tool_name, "arguments": body}
+            )
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
