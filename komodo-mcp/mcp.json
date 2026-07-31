@@ -1,0 +1,13 @@
+{
+  "port": 8000,
+  "health_path": null,
+  "env_vars": {
+    "KOMODO_BASE": "https://komodo.amer.dev"
+  },
+  "env_secrets": {
+    "KOMODO_API_KEY": "komodo-dean-api-key",
+    "KOMODO_API_SECRET": "komodo-dean-api-secret"
+  },
+  "service_account_name": null,
+  "cluster_role": null
+}
