@@ -69,7 +69,7 @@ def _jsonrpc_payload(action: str, **params) -> dict:
     }
 
 
-def _make_request(action: str, **params) -> dict:
+def _make_request(action: str, **params) -> dict | list:
     """Helper: POST the bare params dict as the JSON body.
 
     The real Komodo API expects the POST body to be the bare params
@@ -99,6 +99,35 @@ def _make_request(action: str, **params) -> dict:
         return {"error": str(exc)}
 
 
+def _normalize_result(result):
+    """Normalize a response to handle both bare lists and dicts.
+
+    The real Komodo API returns bare JSON arrays for list-type reads
+    (e.g. ListStacks -> [{...}, {...}]) but objects for single-item reads
+    (e.g. GetStack -> {"name": "...", ...}). This helper ensures the
+    caller can safely use .get() regardless of the shape.
+    """
+    return result
+
+
+def _extract_list(result):
+    """Extract a list from the result, handling both bare lists and wrapped dicts.
+
+    For bare lists: returns the list directly.
+    For dicts: looks for a list value in common keys like 'stacks', 'actions',
+    'result', 'data', or 'items'. Falls back to treating the dict as a
+    single-item result (returns [result] for single-item reads that need list iteration).
+    """
+    if isinstance(result, list):
+        return result
+    # If it's a dict, check for a list-valued key
+    for key in ("stacks", "actions", "items", "result", "data"):
+        val = result.get(key)
+        if isinstance(val, list):
+            return val
+    return [result] if result else []
+
+
 # ──────────────────────── Tools ────────────────────────
 
 
@@ -117,10 +146,12 @@ def list_stacks(namespace: str = "") -> str:
     result = _make_request("ListStacks", **params)
     if "error" in result:
         return f"Error listing stacks: {result['error']}"
-    return f"Found {len(result.get('stacks', []))} stacks:\n" + "\n".join(
+    # Handle both bare list [{...}, ...] and wrapped {"stacks": [{...}, ...]}
+    stacks = _extract_list(result)
+    return f"Found {len(stacks)} stacks:\n" + "\n".join(
         f"  - {s.get('name', '?')} ({s.get('namespace', '?')}): "
         f"status={s.get('status', '?')}"
-        for s in result.get("stacks", [])
+        for s in stacks
     )
 
 
@@ -352,7 +383,8 @@ def list_actions() -> str:
     result = _make_request("ListActions")
     if "error" in result:
         return f"Error listing actions: {result['error']}"
-    actions = result.get("actions", [])
+    # Handle both bare list [{...}, ...] and wrapped {"actions": [{...}, ...]}
+    actions = _extract_list(result)
     if not actions:
         return "No actions available."
     return "Available actions:\n" + "\n".join(
