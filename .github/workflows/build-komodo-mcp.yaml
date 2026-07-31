@@ -17,23 +17,6 @@ env:
   IMAGE: amerenda/komodo-mcp
 
 jobs:
-  test:
-    runs-on: arc-runner-dean-mcp
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r komodo-mcp/pyproject.toml
-      - name: Run tests
-        run: |
-          cd komodo-mcp
-          python -m pytest --tb=short
-
   set-tag:
     if: github.event_name != 'pull_request'
     runs-on: arc-runner-dean-mcp
@@ -44,8 +27,23 @@ jobs:
         id: tag
         run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+  test:
+    runs-on: arc-runner-dean-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install --no-cache-dir -e ./komodo-mcp pytest
+      - name: Import sanity check
+        run: python -c "import komodo_mcp.server"
+      - name: Run tests (if any exist)
+        run: |
+          if [ -d komodo-mcp/tests ]; then pytest komodo-mcp/tests -v; else echo "no tests/ dir yet — skipping"; fi
+
   build:
-    needs: set-tag
+    needs: [set-tag, test]
     if: github.event_name != 'pull_request'
     runs-on: arc-runner-dean-mcp
     outputs:
@@ -70,3 +68,7 @@ jobs:
             ${{ env.IMAGE }}:latest
           cache-from: type=gha,scope=komodo-mcp
           cache-to: type=gha,mode=max,scope=komodo-mcp
+
+  # No deploy job: unlike the older hand-written sibling servers, komodo-mcp is
+  # deployed via the MCP factory registration call (POST /api/v1/mcp/register),
+  # which generates apps/mcp/komodo-mcp/ manifests in k3s-dean-gitops directly.
