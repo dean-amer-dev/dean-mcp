@@ -1,0 +1,74 @@
+name: Build komodo-mcp
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'komodo-mcp/**'
+      - '.github/workflows/build-komodo-mcp.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'komodo-mcp/**'
+      - '.github/workflows/build-komodo-mcp.yaml'
+  workflow_dispatch:
+
+env:
+  IMAGE: amerenda/komodo-mcp
+
+jobs:
+  set-tag:
+    if: github.event_name != 'pull_request'
+    runs-on: arc-runner-dean-mcp
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Set image tag
+        id: tag
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  test:
+    runs-on: arc-runner-dean-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install --no-cache-dir -e ./komodo-mcp pytest
+      - name: Import sanity check
+        run: python -c "import komodo_mcp.server"
+      - name: Run tests (if any exist)
+        run: |
+          if [ -d komodo-mcp/tests ]; then pytest komodo-mcp/tests -v; else echo "no tests/ dir yet — skipping"; fi
+
+  build:
+    needs: [set-tag, test]
+    if: github.event_name != 'pull_request'
+    runs-on: arc-runner-dean-mcp
+    outputs:
+      tag: ${{ needs.set-tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to Docker Hub
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+      - name: Build and push (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./komodo-mcp
+          file: ./komodo-mcp/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ needs.set-tag.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha,scope=komodo-mcp
+          cache-to: type=gha,mode=max,scope=komodo-mcp
+
+  # No deploy job: unlike the older hand-written sibling servers, komodo-mcp is
+  # deployed via the MCP factory registration call (POST /api/v1/mcp/register),
+  # which generates apps/mcp/komodo-mcp/ manifests in k3s-dean-gitops directly.
