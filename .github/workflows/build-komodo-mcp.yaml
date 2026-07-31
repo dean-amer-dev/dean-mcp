@@ -68,7 +68,19 @@ jobs:
             ${{ env.IMAGE }}:latest
           cache-from: type=gha,scope=komodo-mcp
           cache-to: type=gha,mode=max,scope=komodo-mcp
+      - name: Notify MCP factory
+        continue-on-error: true  # don't fail the build if PRAETOR_API_KEY isn't wired up yet
+        env:
+          PRAETOR_API_KEY: ${{ secrets.PRAETOR_API_KEY }}
+        run: |
+          curl -sf -X POST https://praetor.amer.dev/api/v1/mcp/register-from-ci \
+            -H "Authorization: Bearer ${PRAETOR_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$(python3 -c 'import json; d=json.load(open("komodo-mcp/mcp.json")); d["name"]="komodo-mcp"; d["image"]="${{ env.IMAGE }}:latest"; print(json.dumps(d))')"
 
   # No deploy job: unlike the older hand-written sibling servers, komodo-mcp is
   # deployed via the MCP factory registration call (POST /api/v1/mcp/register),
   # which generates apps/mcp/komodo-mcp/ manifests in k3s-dean-gitops directly.
+  # The "Notify MCP factory" step above is what triggers that call now — it's
+  # idempotent (no-op once already registered), so this only matters for the
+  # very first successful build.
