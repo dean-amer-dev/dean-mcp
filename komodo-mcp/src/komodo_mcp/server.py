@@ -7,6 +7,8 @@ Komodo REST API for stack lifecycle management (deploy, sync,
 delete, redeploy), health checks, and action queries.
 """
 
+import time
+
 import httpx
 import os
 
@@ -29,17 +31,21 @@ _READ_PATH = "/read/{action}"
 _EXECUTE_PATH = "/execute/{action}"
 _WRITE_PATH = "/write/{action}"
 
+# Komodo's HTTP API has three routers — /read, /write, /execute —
+# each backed by a distinct tagged enum (ReadRequest, WriteRequest,
+# ExecuteRequest). An action name only exists in exactly one of them;
+# routing it to the wrong router 500s with "unknown variant".
 _METHODS_FOR = {
     "ListStacks": _READ_PATH,
     "ListActions": _READ_PATH,
+    "ListResourceSyncs": _READ_PATH,
     "GetStack": _READ_PATH,
     "GetStackActionState": _READ_PATH,
     "GetAction": _READ_PATH,
-    "RunSync": _WRITE_PATH,
-    "DeployStack": _WRITE_PATH,
+    "RunSync": _EXECUTE_PATH,
+    "DeployStack": _EXECUTE_PATH,
+    "DestroyStack": _EXECUTE_PATH,
     "DeleteStack": _WRITE_PATH,
-    "RedeployStack": _WRITE_PATH,
-    "UndeployStack": _WRITE_PATH,
 }
 
 
@@ -58,15 +64,6 @@ def _headers() -> dict:
 def _resolve_path(action: str) -> str:
     """Return the correct path template for a given action."""
     return _METHODS_FOR.get(action, _READ_PATH)
-
-
-def _jsonrpc_payload(action: str, **params) -> dict:
-    """Build a JSON-RPC-style request body with id, method, and params."""
-    return {
-        "id": 1,
-        "method": action,
-        "params": params or {},
-    }
 
 
 def _make_request(action: str, **params) -> dict | list:
@@ -88,26 +85,15 @@ def _make_request(action: str, **params) -> dict | list:
         resp.raise_for_status()
         data = resp.json()
         # Normalize: some responses wrap result in a "result" key
-        if "result" in data:
+        if isinstance(data, dict) and "result" in data:
             return data["result"]
-        if "data" in data:
+        if isinstance(data, dict) and "data" in data:
             return data["data"]
         return data
     except httpx.HTTPStatusError as exc:
         return {"error": f"{exc.response.status_code}: {exc.response.text[:300]}"}
     except Exception as exc:
         return {"error": str(exc)}
-
-
-def _normalize_result(result):
-    """Normalize a response to handle both bare lists and dicts.
-
-    The real Komodo API returns bare JSON arrays for list-type reads
-    (e.g. ListStacks -> [{...}, {...}]) but objects for single-item reads
-    (e.g. GetStack -> {"name": "...", ...}). This helper ensures the
-    caller can safely use .get() regardless of the shape.
-    """
-    return result
 
 
 def _extract_list(result):
@@ -121,11 +107,29 @@ def _extract_list(result):
     if isinstance(result, list):
         return result
     # If it's a dict, check for a list-valued key
-    for key in ("stacks", "actions", "items", "result", "data"):
+    for key in ("stacks", "actions", "syncs", "items", "result", "data"):
         val = result.get(key)
         if isinstance(val, list):
             return val
     return [result] if result else []
+
+
+def _wait_for_stack_action_state(
+    stack_name: str, flag: str, timeout: int = 60, interval: int = 2
+) -> dict | None:
+    """Poll GetStackActionState until `flag` clears or timeout elapses.
+
+    Client-side convenience only — Komodo's DeployStack/DestroyStack
+    requests have no server-side "wait" field.
+    """
+    elapsed = 0
+    while elapsed < timeout:
+        result = _make_request("GetStackActionState", stack=stack_name)
+        if isinstance(result, dict) and "error" not in result and not result.get(flag, False):
+            return result
+        time.sleep(interval)
+        elapsed += interval
+    return None
 
 
 # ──────────────────────── Tools ────────────────────────
@@ -144,13 +148,12 @@ def list_stacks(namespace: str = "") -> str:
     if namespace:
         params["namespace"] = namespace
     result = _make_request("ListStacks", **params)
-    if "error" in result:
+    if isinstance(result, dict) and "error" in result:
         return f"Error listing stacks: {result['error']}"
-    # Handle both bare list [{...}, ...] and wrapped {"stacks": [{...}, ...]}
     stacks = _extract_list(result)
     return f"Found {len(stacks)} stacks:\n" + "\n".join(
         f"  - {s.get('name', '?')} ({s.get('namespace', '?')}): "
-        f"status={s.get('status', '?')}"
+        f"status={s.get('status', s.get('info', {}).get('state', '?'))}"
         for s in stacks
     )
 
@@ -172,7 +175,7 @@ def get_stack(name: str = "", namespace: str = "") -> str:
     if namespace:
         params["namespace"] = namespace
     result = _make_request("GetStack", **params)
-    if "error" in result:
+    if isinstance(result, dict) and "error" in result:
         return f"Error getting stack: {result['error']}"
     return f"Stack '{result.get('name', '')}':\n" + "\n".join(
         f"  {k}: {v}" for k, v in result.items() if k != "stacks"
@@ -180,210 +183,207 @@ def get_stack(name: str = "", namespace: str = "") -> str:
 
 
 @mcp.tool()
-def get_stack_action_state(
-    stack_name: str = "",
-    action_name: str = "",
-) -> str:
+def get_stack_action_state(stack_name: str = "") -> str:
     """
-    Check the current state of an action on a Komodo stack.
+    Check which actions are currently in progress for a Komodo stack
+    (pulling, deploying, starting, restarting, pausing, unpausing,
+    stopping, destroying).
 
-    Useful for verifying if a deploy, sync, or delete is in progress
-    or has completed.
+    Useful for verifying if a deploy, sync, or destroy triggered via
+    deploy_stack/run_sync/undeploy_stack is still running or has finished.
 
     Args:
-        stack_name: The stack to check.
-        action_name: The specific action to check (e.g. 'DeployStack').
+        stack_name: The stack to check (required).
 
-    Returns the action state and status.
+    Returns which action flags are currently true for the stack.
     """
-    params: dict[str, str] = {}
-    if stack_name:
-        params["stackName"] = stack_name
-    if action_name:
-        params["actionName"] = action_name
-    result = _make_request("GetStackActionState", **params)
-    if "error" in result:
+    result = _make_request("GetStackActionState", stack=stack_name)
+    if isinstance(result, dict) and "error" in result:
         return f"Error getting action state: {result['error']}"
-    return f"Action '{result.get('actionName', '')}' on stack "
-    f"'{result.get('stackName', '')}': status={result.get('state', 'unknown')}"
+    if not isinstance(result, dict):
+        return f"Unexpected response: {result}"
+    active = [k for k, v in result.items() if v]
+    return f"Stack '{stack_name}' action state:\n" + (
+        "  " + ", ".join(active) if active else "  no actions in progress"
+    )
+
+
+@mcp.tool()
+def list_resource_syncs() -> str:
+    """
+    List all Komodo ResourceSync resources.
+
+    A ResourceSync is a distinct resource type from a Stack — it
+    represents a git-backed sync configuration (e.g. a gitops repo).
+    Use this to find the correct `sync_name` to pass to run_sync;
+    it will not generally match a stack name.
+
+    Returns a formatted list of resource sync names and ids.
+    """
+    result = _make_request("ListResourceSyncs")
+    if isinstance(result, dict) and "error" in result:
+        return f"Error listing resource syncs: {result['error']}"
+    syncs = _extract_list(result)
+    return f"Found {len(syncs)} resource syncs:\n" + "\n".join(
+        f"  - {s.get('name', '?')} (id={s.get('id', '?')})" for s in syncs
+    )
 
 
 @mcp.tool()
 def run_sync(
-    stack_name: str = "",
-    namespace: str = "",
-    timeout: int = 300,
+    sync_name: str = "",
+    resource_type: str = "",
+    resources: list[str] | None = None,
 ) -> str:
     """
-    Trigger a resource sync for one or all Komodo stacks.
-
-    Forces the stack to reconcile its desired state with the actual
-    state in the cluster.
+    Trigger a Komodo ResourceSync to run, reconciling the desired
+    (git) state with the actual state.
 
     Args:
-        stack_name: Specific stack to sync (empty for all stacks).
-        namespace: Optional namespace filter.
-        timeout: Maximum time to wait for sync completion (seconds).
+        sync_name: Name or id of the ResourceSync to run (required).
+            This is a ResourceSync, not a Stack — use list_resource_syncs
+            to find the correct name.
+        resource_type: Optionally restrict the sync to one resource type
+            (combine with `resources`).
+        resources: Optionally restrict the sync to specific resource
+            names/ids of `resource_type`.
 
-    Returns sync job details and status.
+    Returns the resulting Update status.
     """
-    params: dict[str, str | int] = {}
-    if stack_name:
-        params["stackName"] = stack_name
-    if namespace:
-        params["namespace"] = namespace
-    params["timeout"] = timeout
+    params: dict = {"sync": sync_name}
+    if resource_type:
+        params["resource_type"] = resource_type
+    if resources:
+        params["resources"] = resources
     result = _make_request("RunSync", **params)
-    if "error" in result:
+    if isinstance(result, dict) and "error" in result:
         return f"Error running sync: {result['error']}"
-    return (
-        f"Sync triggered for stack '{result.get('stackName', 'all')}'.\n"
-        f"Sync ID: {result.get('syncId', 'N/A')}, "
-        f"status: {result.get('status', 'running')}"
-    )
+    status = result.get("status", result) if isinstance(result, dict) else result
+    return f"Sync '{sync_name}' triggered.\nUpdate status: {status}"
 
 
 @mcp.tool()
 def deploy_stack(
     stack_name: str = "",
-    version: str = "latest",
-    namespace: str = "",
+    services: list[str] | None = None,
+    stop_time: int | None = None,
     wait: bool = True,
 ) -> str:
     """
-    Deploy a Komodo stack to the target Kubernetes cluster.
+    Deploy a Komodo stack (`docker compose up`).
 
-    Creates or updates the stack with the specified version.
-    Optionally waits for the deployment to complete.
+    Creates or updates the running containers to match the stack's
+    latest configuration.
 
     Args:
-        stack_name: Name of the stack to deploy (required).
-        version: Target version to deploy (default: 'latest').
-        namespace: Target namespace (default: '').
-        wait: Whether to wait for completion (default: True).
+        stack_name: Name or id of the stack to deploy (required).
+        services: Specific services to deploy (empty deploys all services).
+        stop_time: Override the default termination max time, only used
+            if the stack needs to be taken down first.
+        wait: Poll get_stack_action_state until the deploy finishes,
+            up to 60s (default: True). This is client-side polling —
+            Komodo's API has no server-side wait.
 
-    Returns deployment result with status and details.
+    Returns the resulting Update status.
     """
-    params: dict[str, str | bool | int] = {}
-    if stack_name:
-        params["stackName"] = stack_name
-    params["version"] = version
-    if namespace:
-        params["namespace"] = namespace
-    params["wait"] = wait
+    params: dict = {"stack": stack_name, "services": services or []}
+    if stop_time is not None:
+        params["stop_time"] = stop_time
     result = _make_request("DeployStack", **params)
-    if "error" in result:
+    if isinstance(result, dict) and "error" in result:
         return f"Error deploying stack: {result['error']}"
-    return (
-        f"Stack '{result.get('stackName', '')}' deployed.\n"
-        f"Status: {result.get('status', 'deploying')}, "
-        f"version: {result.get('version', 'unknown')}"
-    )
-
-
-@mcp.tool()
-def delete_stack(
-    stack_name: str = "",
-    namespace: str = "",
-    force: bool = False,
-) -> str:
-    """
-    Delete a Komodo stack from the target cluster.
-
-    Args:
-        stack_name: Name of the stack to delete (required).
-        namespace: Target namespace (default: '').
-        force: Whether to force deletion (default: False).
-
-    Returns deletion result with status and details.
-    """
-    params: dict[str, str | bool] = {}
-    if stack_name:
-        params["stackName"] = stack_name
-    if namespace:
-        params["namespace"] = namespace
-    params["force"] = force
-    result = _make_request("DeleteStack", **params)
-    if "error" in result:
-        return f"Error deleting stack: {result['error']}"
-    return (
-        f"Stack '{result.get('stackName', '')}' deleted.\n"
-        f"Status: {result.get('status', 'deleted')}"
-    )
+    if wait:
+        _wait_for_stack_action_state(stack_name, "deploying")
+    status = result.get("status", result) if isinstance(result, dict) else result
+    return f"Stack '{stack_name}' deploy triggered.\nUpdate status: {status}"
 
 
 @mcp.tool()
 def redeploy_stack(
     stack_name: str = "",
-    version: str = "",
-    namespace: str = "",
+    services: list[str] | None = None,
 ) -> str:
     """
     Redeploy a Komodo stack.
 
-    Args:
-        stack_name: Name of the stack to redeploy (required).
-        version: Optional target version (empty to keep current).
-        namespace: Target namespace (default: '').
+    Komodo has no separate "redeploy" action — this is a thin wrapper
+    around deploy_stack (deploying again is the redeploy).
 
-    Returns redeployment result with status and details.
+    Args:
+        stack_name: Name or id of the stack to redeploy (required).
+        services: Specific services to redeploy (empty redeploys all services).
+
+    Returns the resulting Update status.
     """
-    params: dict[str, str | bool] = {}
-    if stack_name:
-        params["stackName"] = stack_name
-    if version:
-        params["version"] = version
-    if namespace:
-        params["namespace"] = namespace
-    result = _make_request("RedeployStack", **params)
-    if "error" in result:
-        return f"Error redeploying stack: {result['error']}"
-    return (
-        f"Stack '{result.get('stackName', '')}' redeployed.\n"
-        f"Status: {result.get('status', 'redeploying')}"
-    )
+    return deploy_stack(stack_name=stack_name, services=services)
 
 
 @mcp.tool()
 def undeploy_stack(
     stack_name: str = "",
-    namespace: str = "",
+    services: list[str] | None = None,
+    remove_orphans: bool = False,
+    stop_time: int | None = None,
 ) -> str:
     """
-    Undeploy a Komodo stack from the target cluster.
+    Tear down a Komodo stack's running containers (`docker compose down`).
+
+    This does NOT delete the Stack resource itself — use delete_stack
+    for that, after undeploying.
 
     Args:
-        stack_name: Name of the stack to undeploy (required).
-        namespace: Target namespace (default: '').
+        stack_name: Name or id of the stack to undeploy (required).
+        services: Specific services to undeploy (empty undeploys all services).
+        remove_orphans: Pass `--remove-orphans` to `docker compose down`.
+        stop_time: Override the default termination max time.
 
-    Returns undeployment result with status and details.
+    Returns the resulting Update status.
     """
-    params: dict[str, str] = {}
-    if stack_name:
-        params["stackName"] = stack_name
-    if namespace:
-        params["namespace"] = namespace
-    result = _make_request("UndeployStack", **params)
-    if "error" in result:
+    params: dict = {
+        "stack": stack_name,
+        "services": services or [],
+        "remove_orphans": remove_orphans,
+    }
+    if stop_time is not None:
+        params["stop_time"] = stop_time
+    result = _make_request("DestroyStack", **params)
+    if isinstance(result, dict) and "error" in result:
         return f"Error undeploying stack: {result['error']}"
-    return (
-        f"Stack '{result.get('stackName', '')}' undeployed.\n"
-        f"Status: {result.get('status', 'undeployed')}"
-    )
+    status = result.get("status", result) if isinstance(result, dict) else result
+    return f"Stack '{stack_name}' undeploy (destroy) triggered.\nUpdate status: {status}"
+
+
+@mcp.tool()
+def delete_stack(stack_name: str = "") -> str:
+    """
+    Delete a Komodo Stack resource.
+
+    This removes the Stack's configuration from Komodo. If containers
+    are still running, undeploy_stack first.
+
+    Args:
+        stack_name: Name or id of the stack to delete (required).
+
+    Returns the deleted stack's name.
+    """
+    result = _make_request("DeleteStack", id=stack_name)
+    if isinstance(result, dict) and "error" in result:
+        return f"Error deleting stack: {result['error']}"
+    name = result.get("name", stack_name) if isinstance(result, dict) else stack_name
+    return f"Stack '{name}' deleted."
 
 
 @mcp.tool()
 def list_actions() -> str:
     """
-    List all available Komodo actions and their descriptions.
+    List all Komodo Action resources and their descriptions.
 
     Returns a list of available actions with their types
     (read, execute, write) and descriptions.
     """
     result = _make_request("ListActions")
-    if "error" in result:
+    if isinstance(result, dict) and "error" in result:
         return f"Error listing actions: {result['error']}"
-    # Handle both bare list [{...}, ...] and wrapped {"actions": [{...}, ...]}
     actions = _extract_list(result)
     if not actions:
         return "No actions available."
@@ -395,26 +395,17 @@ def list_actions() -> str:
 
 
 @mcp.tool()
-def get_action(
-    action_name: str = "",
-    action_id: str = "",
-) -> str:
+def get_action(action_name: str = "") -> str:
     """
-    Get details about a specific Komodo action.
+    Get details about a specific Komodo Action resource.
 
     Args:
-        action_name: Name of the action.
-        action_id: ID of the action (alternative to name).
+        action_name: Name or id of the action (required).
 
     Returns action details including status, parameters, and result.
     """
-    params: dict[str, str] = {}
-    if action_name:
-        params["actionName"] = action_name
-    if action_id:
-        params["actionId"] = action_id
-    result = _make_request("GetAction", **params)
-    if "error" in result:
+    result = _make_request("GetAction", action=action_name)
+    if isinstance(result, dict) and "error" in result:
         return f"Error getting action: {result['error']}"
     return (
         f"Action '{result.get('name', '')}':\n"
@@ -444,21 +435,15 @@ def health() -> str:
         "api_secret_configured": bool(KOMODO_API_SECRET),
     }
 
-    # Quick check to Komodo API
-    try:
-        resp = httpx.get(
-            f"{KOMODO_BASE}/read/ListStacks",
-            headers=_headers(),
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            details["komodo_api"] = "healthy"
-        else:
-            details["komodo_api"] = f"unhealthy (HTTP {resp.status_code})"
-            healthy = False
-    except Exception as exc:
-        details["komodo_api"] = f"error ({exc})"
+    # Komodo's /read/{variant} router only accepts POST — a GET always
+    # 405s regardless of API health, so probe it the same way real
+    # clients do.
+    result = _make_request("ListStacks")
+    if isinstance(result, dict) and "error" in result:
+        details["komodo_api"] = f"unhealthy ({result['error']})"
         healthy = False
+    else:
+        details["komodo_api"] = "healthy"
 
     return f"Health: {'OK' if healthy else 'DEGRADED'}\n" + "\n".join(
         f"  {k}: {v}" for k, v in details.items()
