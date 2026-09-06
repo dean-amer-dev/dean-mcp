@@ -42,6 +42,10 @@ _METHODS_FOR = {
     "GetStack": _READ_PATH,
     "GetStackActionState": _READ_PATH,
     "GetAction": _READ_PATH,
+    "GetStackLog": _READ_PATH,
+    "SearchStackLog": _READ_PATH,
+    "ListUpdates": _READ_PATH,
+    "GetUpdate": _READ_PATH,
     "RunSync": _EXECUTE_PATH,
     "DeployStack": _EXECUTE_PATH,
     "DestroyStack": _EXECUTE_PATH,
@@ -112,6 +116,22 @@ def _extract_list(result):
         if isinstance(val, list):
             return val
     return [result] if result else []
+
+
+def _format_log(log) -> str:
+    """Mirror Komodo's own Log.combined(): stdout+stderr if both present,
+    whichever one is present if only one, "No log" if neither."""
+    if not isinstance(log, dict):
+        return str(log)
+    stdout = log.get("stdout", "")
+    stderr = log.get("stderr", "")
+    if stdout and stderr:
+        return f"stdout: {stdout}\n\nstderr: {stderr}"
+    if stdout:
+        return stdout
+    if stderr:
+        return stderr
+    return "No log"
 
 
 def _wait_for_stack_action_state(
@@ -226,6 +246,156 @@ def list_resource_syncs() -> str:
     syncs = _extract_list(result)
     return f"Found {len(syncs)} resource syncs:\n" + "\n".join(
         f"  - {s.get('name', '?')} (id={s.get('id', '?')})" for s in syncs
+    )
+
+
+@mcp.tool()
+def get_stack_log(
+    stack_name: str = "",
+    services: list[str] | None = None,
+    tail: int = 100,
+    timestamps: bool = False,
+) -> str:
+    """
+    Get a Komodo stack's container logs (`docker compose logs` equivalent).
+
+    Hits the underlying Periphery server directly for the freshest data
+    (not cached in Core).
+
+    Args:
+        stack_name: Name or id of the stack (required).
+        services: Filter to specific services (empty includes all services).
+        tail: Number of lines of log tail to include (server max: 5000).
+        timestamps: Enable `--timestamps`.
+
+    Returns the combined stdout/stderr log output.
+    """
+    params: dict = {
+        "stack": stack_name,
+        "services": services or [],
+        "tail": tail,
+        "timestamps": timestamps,
+    }
+    result = _make_request("GetStackLog", **params)
+    if isinstance(result, dict) and "error" in result:
+        return f"Error getting stack log: {result['error']}"
+    return f"Log for stack '{stack_name}':\n{_format_log(result)}"
+
+
+@mcp.tool()
+def search_stack_log(
+    stack_name: str = "",
+    terms: list[str] | None = None,
+    services: list[str] | None = None,
+    combinator: str = "OR",
+    invert: bool = False,
+    timestamps: bool = False,
+) -> str:
+    """
+    Search a Komodo stack's container log tail using `grep`.
+
+    Hits the underlying Periphery server directly for the freshest data
+    (not cached in Core).
+
+    Args:
+        stack_name: Name or id of the stack (required).
+        terms: The terms to search for (required).
+        services: Filter to specific services (empty includes all services).
+        combinator: "AND" requires all terms on a line, "OR" (default)
+            requires any one term.
+        invert: Return lines that DON'T match the terms/combinator instead.
+        timestamps: Enable `--timestamps`.
+
+    Returns the matching log lines.
+    """
+    params: dict = {
+        "stack": stack_name,
+        "services": services or [],
+        "terms": terms or [],
+        "combinator": combinator,
+        "invert": invert,
+        "timestamps": timestamps,
+    }
+    result = _make_request("SearchStackLog", **params)
+    if isinstance(result, dict) and "error" in result:
+        return f"Error searching stack log: {result['error']}"
+    return f"Search results for stack '{stack_name}':\n{_format_log(result)}"
+
+
+@mcp.tool()
+def list_updates(
+    target_type: str = "",
+    target_id: str = "",
+    page: int = 0,
+) -> str:
+    """
+    List Komodo Updates — the execution history of every action Komodo
+    has performed (deploys, syncs, destroys, etc.), most recent first.
+
+    Args:
+        target_type: Resource type to filter to, e.g. "Stack". Must be
+            given together with target_id, otherwise ignored.
+        target_id: Mongo `_id` of the resource to filter to (get this
+            from get_stack's `_id.$oid`). Must be given together with
+            target_type.
+        page: Page of results, 0 = most recent (default).
+
+    Returns a formatted list of updates: id, operation, status, success,
+    start_ts, target. Use get_update on an id for the full record.
+    """
+    params: dict = {"page": page}
+    if target_type and target_id:
+        params["query"] = {"target.type": target_type, "target.id": target_id}
+    result = _make_request("ListUpdates", **params)
+    if isinstance(result, dict) and "error" in result:
+        return f"Error listing updates: {result['error']}"
+    updates = result.get("updates", []) if isinstance(result, dict) else []
+    next_page = result.get("next_page") if isinstance(result, dict) else None
+    header = f"Found {len(updates)} updates (next_page={next_page}):"
+    if not updates:
+        return header
+    return header + "\n" + "\n".join(
+        f"  - id={u.get('id', '?')} op={u.get('operation', '?')} "
+        f"status={u.get('status', '?')} success={u.get('success', '?')} "
+        f"start_ts={u.get('start_ts', '?')} target={u.get('target', '?')}"
+        for u in updates
+    )
+
+
+@mcp.tool()
+def get_update(update_id: str = "") -> str:
+    """
+    Get the full record for a single Komodo Update, including every
+    command Komodo ran and its real stdout/stderr — this is the only way
+    to see what a pre_deploy script actually did (or didn't do).
+
+    Args:
+        update_id: The update's id (required, from list_updates).
+
+    Returns status, success, start_ts/end_ts, and every log entry
+    (stage, command, success, combined stdout/stderr).
+    """
+    result = _make_request("GetUpdate", id=update_id)
+    if isinstance(result, dict) and "error" in result:
+        return f"Error getting update: {result['error']}"
+    if not isinstance(result, dict):
+        return f"Unexpected response: {result}"
+    logs = result.get("logs", [])
+    header = (
+        f"Update '{update_id}':\n"
+        f"  status: {result.get('status', '?')}\n"
+        f"  success: {result.get('success', '?')}\n"
+        f"  start_ts: {result.get('start_ts', '?')}\n"
+        f"  end_ts: {result.get('end_ts', '?')}\n"
+    )
+    if not logs:
+        return header + "  (no logs)"
+    return header + "\n".join(
+        f"  --- stage: {log.get('stage', '?')} ---\n"
+        f"  command: {log.get('command', '?')}\n"
+        f"  success: {log.get('success', '?')}\n"
+        f"  {_format_log(log)}"
+        for log in logs
     )
 
 
