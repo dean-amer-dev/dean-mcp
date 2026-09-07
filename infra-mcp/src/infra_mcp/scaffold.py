@@ -82,8 +82,10 @@ label = "deploy:{name}"
 
 
 def scaffold_stateful_stub(name: str, port: int = 8000) -> str:
-    """Generate a Komodo docker compose service block stub for a stateful app."""
-    return f"""  # Add to komodo-dean-gitops/mac-mini-m4/<stack>/compose.yaml under 'services:'
+    """Generate a Komodo docker compose file for a new stateful app's own directory."""
+    return f"""name: {name}
+
+services:
   {name}:
     image: amerenda/{name}:latest
     container_name: {name}
@@ -95,6 +97,40 @@ def scaffold_stateful_stub(name: str, port: int = 8000) -> str:
     volumes:
       - {name}-data:/data
 
-  # Add under top-level 'volumes:' key:
-  # {name}-data:
+volumes:
+  {name}-data:
+"""
+
+
+_SERVER_TAGS = {
+    "mac-mini-m4": "mac-mini",
+    "murderbot": "murderbot",
+    "archlinux": "archlinux",
+}
+
+
+def scaffold_stateful_stack_block(name: str, description: str, server: str) -> str:
+    """Generate the [[stack]] block for resource-sync/stacks.toml.
+
+    webhook_force_deploy = true is always included, never optional -- see
+    GITOPS_POLICY.md rule 5 (2026-09-07): every deploy=true stack must have
+    this set or a push can fire the deploy webhook and still no-op instead
+    of redeploying. Registering the webhook itself happens in a separate
+    step (register_webhook) after this stack's PR is merged and Komodo has
+    synced it, since the webhook URL needs Komodo's assigned stack UUID.
+    """
+    tag = _SERVER_TAGS.get(server, server)
+    return f"""[[stack]]
+name = "{name}"
+description = "{description}"
+tags = ["{tag}"]
+deploy = true
+[stack.config]
+server = "{server}"
+repo = "amerenda/komodo-dean-gitops"
+branch = "main"
+file_paths = ["{server}/{name}/compose.yaml"]
+git_account = "amerenda"
+project_name = "{name}"
+webhook_force_deploy = true
 """

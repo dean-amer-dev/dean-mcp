@@ -16,13 +16,20 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .github_auth import get_installation_token
-from .scaffold import scaffold_stateless_spec, scaffold_stateful_stub
+from .scaffold import (
+    scaffold_stateless_spec,
+    scaffold_stateful_stub,
+    scaffold_stateful_stack_block,
+)
 
 mcp = FastMCP(
     "infra-mcp",
     instructions=(
         "Provisions stateless (k3s) and stateful (Komodo) services. "
-        "Full pattern for a new app: scaffold → provision → deploy_pr (k3s) + add_runner (arm64 CI). "
+        "Stateless pattern: scaffold → provision → deploy_pr (k3s) + add_runner (arm64 CI). "
+        "Stateful (Komodo) pattern: scaffold → provision_stateful (opens PR) → after merge, "
+        "register_webhook (stack has no live deploy trigger until this runs — see "
+        "komodo-dean-gitops/GITOPS_POLICY.md rule 5). "
         "Never hardcode secrets — use bws_name references in TOML specs."
     ),
 )
@@ -164,14 +171,13 @@ def scaffold(
         spec_path.write_text(content)
         return {"path": str(spec_path), "app_type": "stateless", "next_step": f"provision('{name}')"}
 
-    content = scaffold_stateful_stub(name, port)
     return {
         "app_type": "stateful",
-        "compose_stub": content,
         "next_step": (
-            f"1. Add the compose block to the appropriate komodo-dean-gitops/<host>/<stack>/compose.yaml. "
-            f"2. If a database or generated secrets are needed, run provision('{name}'). "
-            f"3. Commit and push to komodo-dean-gitops — Komodo auto-deploys within 60s."
+            f"Call provision_stateful('{name}', description, server=..., port={port}) "
+            "to write the compose file + [[stack]] block and open a PR. "
+            f"After that PR is merged, call register_webhook('{name}') — a stack has no live "
+            "deploy trigger until its GitHub webhook is registered (see GITOPS_POLICY.md rule 5)."
         ),
     }
 
@@ -391,6 +397,250 @@ def add_runner(name: str, title: str | None = None) -> dict:
         return {"error": "Failed to open PR", "response": pr_resp.text[:500]}
 
     return {"status": "pr_opened", "url": pr_resp.json()["html_url"], "branch": branch}
+
+
+KOMODO_BASE = os.environ.get("KOMODO_BASE", "http://localhost:9120")
+KOMODO_API_KEY = os.environ.get("KOMODO_API_KEY", "")
+KOMODO_API_SECRET = os.environ.get("KOMODO_API_SECRET", "")
+_KOMODO_SYNC_NAME = "komodo-dean-gitops"
+
+# Same three-router shape verified working in komodo-mcp (read/write/execute,
+# bare params dict as POST body, no JSON-RPC envelope) -- reuse it exactly
+# rather than infra-mcp's older app_status()/KOMODO_URL GET-based call,
+# which hits a different, unverified endpoint shape.
+_KOMODO_METHODS = {"GetStack": "read", "RunSync": "execute"}
+
+
+def _komodo_request(action: str, **params) -> dict:
+    router = _KOMODO_METHODS[action]
+    headers = {"Content-Type": "application/json"}
+    if KOMODO_API_KEY:
+        headers["X-Api-Key"] = KOMODO_API_KEY
+    if KOMODO_API_SECRET:
+        headers["X-Api-Secret"] = KOMODO_API_SECRET
+    try:
+        resp = httpx.post(
+            f"{KOMODO_BASE}/{router}/{action}",
+            json=params,
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and "result" in data:
+            return data["result"]
+        return data
+    except httpx.HTTPStatusError as exc:
+        return {"error": f"{exc.response.status_code}: {exc.response.text[:300]}"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+_GITHUB_HOOKS_URL = "https://api.github.com/repos/amerenda/komodo-dean-gitops/hooks"
+
+
+def _github_headers(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+@mcp.tool()
+def provision_stateful(
+    name: str,
+    description: str,
+    server: Literal["mac-mini-m4", "murderbot", "archlinux"] = "mac-mini-m4",
+    port: int = 8000,
+    title: str | None = None,
+) -> dict:
+    """Scaffold a new Komodo-managed (stateful) app and open a PR.
+
+    Writes <server>/<name>/compose.yaml and appends a [[stack]] block to
+    resource-sync/stacks.toml, with webhook_force_deploy = true always
+    included (GITOPS_POLICY.md rule 5 — CI fails a PR missing it).
+
+    This PR alone is not enough for the stack to actually deploy on future
+    merges: after it's merged, call register_webhook(name). The GitHub
+    deploy webhook can't be created before that, because its URL needs the
+    stack's Komodo-assigned UUID, which only exists once ResourceSync has
+    picked up the merged [[stack]] block.
+    """
+    app_id = os.environ.get("CODER_APP_ID", "")
+    installation_id = os.environ.get("CODER_INSTALLATION_ID", "")
+    private_key = os.environ.get("CODER_APP_PRIVATE_KEY", "")
+    if not all([app_id, installation_id, private_key]):
+        return {"error": "CODER_APP_ID, CODER_INSTALLATION_ID, CODER_APP_PRIVATE_KEY must all be set."}
+
+    try:
+        token = get_installation_token(app_id, installation_id, private_key)
+    except Exception as e:
+        return {"error": f"GitHub App auth failed: {e}"}
+
+    compose_path = KOMODO_DIR / server / name / "compose.yaml"
+    stacks_toml_path = KOMODO_DIR / "resource-sync" / "stacks.toml"
+
+    if compose_path.exists():
+        return {"error": f"{compose_path} already exists — refusing to overwrite."}
+    stacks_toml_current = stacks_toml_path.read_text()
+    if f'name = "{name}"' in stacks_toml_current:
+        return {"error": f"A [[stack]] named '{name}' already exists in resource-sync/stacks.toml."}
+
+    compose_path.parent.mkdir(parents=True, exist_ok=True)
+    compose_path.write_text(scaffold_stateful_stub(name, port))
+    stack_block = scaffold_stateful_stack_block(name, description, server)
+    stacks_toml_path.write_text(stacks_toml_current.rstrip("\n") + "\n\n" + stack_block)
+
+    remote_url = f"https://x-access-token:{token}@github.com/amerenda/komodo-dean-gitops.git"
+    branch = f"feat/stack-{name}-{_short_ts()}"
+    bot_env = {
+        "GIT_AUTHOR_NAME": "amerenda-coder[bot]",
+        "GIT_AUTHOR_EMAIL": "amerenda-coder[bot]@users.noreply.github.com",
+        "GIT_COMMITTER_NAME": "amerenda-coder[bot]",
+        "GIT_COMMITTER_EMAIL": "amerenda-coder[bot]@users.noreply.github.com",
+    }
+    pr_title = title or f"feat({name}): provision new Komodo stack"
+    rel_compose = str(compose_path.relative_to(KOMODO_DIR))
+
+    def _revert():
+        compose_path.unlink(missing_ok=True)
+        stacks_toml_path.write_text(stacks_toml_current)
+        _run(["git", "checkout", "main"], cwd=KOMODO_DIR)
+
+    for cmd, desc in [
+        (["git", "checkout", "-b", branch], "create branch"),
+        (["git", "add", rel_compose, "resource-sync/stacks.toml"], "stage files"),
+        (
+            ["git", "commit", "-m", f"feat({name}): provision new Komodo stack\n\n"
+             f"Added by infra-mcp. Run register_webhook('{name}') after merge."],
+            "commit",
+        ),
+        (["git", "push", remote_url, branch], "push branch"),
+    ]:
+        rc, stdout, stderr = _run(cmd, cwd=KOMODO_DIR, extra_env=bot_env)
+        if rc != 0:
+            _revert()
+            return {"error": f"git {desc} failed", "stderr": stderr[-500:]}
+
+    pr_resp = httpx.post(
+        "https://api.github.com/repos/amerenda/komodo-dean-gitops/pulls",
+        headers=_github_headers(token),
+        json={
+            "title": pr_title,
+            "head": branch,
+            "base": "main",
+            "body": (
+                f"Provisions new Komodo stack `{name}` on `{server}`.\n\n"
+                f"**After merge, run `register_webhook('{name}')`** — this stack has no live "
+                "deploy trigger until its GitHub webhook is registered (GITOPS_POLICY.md rule 5)."
+            ),
+        },
+        timeout=30,
+    )
+    _run(["git", "checkout", "main"], cwd=KOMODO_DIR)
+
+    if pr_resp.status_code not in (200, 201):
+        return {"error": "Failed to open PR", "response": pr_resp.text[:500]}
+
+    return {
+        "status": "pr_opened",
+        "url": pr_resp.json()["html_url"],
+        "branch": branch,
+        "next_step": f"After merge, call register_webhook('{name}') to finish onboarding.",
+    }
+
+
+@mcp.tool()
+def register_webhook(name: str, max_wait_seconds: int = 60) -> dict:
+    """Register a GitHub deploy webhook for a Komodo stack so merges actually deploy it.
+
+    Call after merging a provision_stateful() PR, or for any existing stack
+    found missing its webhook (GITOPS_POLICY.md rule 5 — CI only checks
+    webhook_force_deploy, not webhook existence, so a hand-added stack can
+    still be silently orphaned; verify with
+    `gh api repos/amerenda/komodo-dean-gitops/hooks`).
+
+    Triggers RunSync first — Komodo's ResourceSync webhook is confirmed
+    broken (moghtech/komodo#1120) and never auto-executes, so a merged
+    [[stack]] block otherwise wouldn't be visible to the Komodo API until
+    the 5-minute poll fallback runs. Then polls GetStack for the new
+    stack's UUID, and creates the webhook via the GitHub API using
+    komodo-dean-webhook-secret from BWS. Idempotent — a stack that already
+    has this exact webhook registered returns status=already_exists.
+
+    Requires KOMODO_API_KEY, a GitHub App token (CODER_APP_ID/
+    CODER_INSTALLATION_ID/CODER_APP_PRIVATE_KEY), and BWS_ACCESS_TOKEN.
+    """
+    if not KOMODO_API_KEY:
+        return {"error": "KOMODO_API_KEY not set."}
+
+    app_id = os.environ.get("CODER_APP_ID", "")
+    installation_id = os.environ.get("CODER_INSTALLATION_ID", "")
+    private_key = os.environ.get("CODER_APP_PRIVATE_KEY", "")
+    if not all([app_id, installation_id, private_key]):
+        return {"error": "CODER_APP_ID, CODER_INSTALLATION_ID, CODER_APP_PRIVATE_KEY must all be set."}
+    try:
+        token = get_installation_token(app_id, installation_id, private_key)
+    except Exception as e:
+        return {"error": f"GitHub App auth failed: {e}"}
+
+    sync_result = _komodo_request("RunSync", sync=_KOMODO_SYNC_NAME)
+    if isinstance(sync_result, dict) and "error" in sync_result:
+        return {"error": f"RunSync failed: {sync_result['error']}"}
+
+    stack = None
+    deadline = time.time() + max_wait_seconds
+    while time.time() < deadline:
+        result = _komodo_request("GetStack", name=name)
+        if isinstance(result, dict) and "_id" in result:
+            stack = result
+            break
+        time.sleep(3)
+    if stack is None:
+        return {"error": f"Stack '{name}' not found in Komodo after RunSync + {max_wait_seconds}s wait."}
+
+    raw_id = stack["_id"]
+    stack_id = raw_id.get("$oid") if isinstance(raw_id, dict) else raw_id
+    if not stack_id:
+        return {"error": f"Could not determine stack id from GetStack response: {stack}"}
+
+    webhook_url = f"https://pubhooks.amer.dev/listener/github/stack/{stack_id}/deploy"
+    existing_resp = httpx.get(_GITHUB_HOOKS_URL, headers=_github_headers(token), timeout=30)
+    if existing_resp.status_code == 200:
+        for hook in existing_resp.json():
+            if hook.get("config", {}).get("url") == webhook_url:
+                return {"status": "already_exists", "stack_id": stack_id, "webhook_id": hook["id"]}
+
+    secret_resp = resolve_secret("komodo-dean-webhook-secret")
+    if "error" in secret_resp:
+        return {"error": f"Could not resolve komodo-dean-webhook-secret: {secret_resp['error']}"}
+
+    hook_resp = httpx.post(
+        _GITHUB_HOOKS_URL,
+        headers=_github_headers(token),
+        json={
+            "name": "web",
+            "active": True,
+            "events": ["push"],
+            "config": {
+                "url": webhook_url,
+                "content_type": "json",
+                "secret": secret_resp["value"],
+                "insecure_ssl": "0",
+            },
+        },
+        timeout=30,
+    )
+    if hook_resp.status_code not in (200, 201):
+        return {"error": "Failed to create webhook", "response": hook_resp.text[:500]}
+
+    return {
+        "status": "webhook_registered",
+        "stack_id": stack_id,
+        "webhook_id": hook_resp.json()["id"],
+        "url": webhook_url,
+    }
 
 
 @mcp.tool()
