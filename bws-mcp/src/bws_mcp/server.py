@@ -72,6 +72,22 @@ def list_secret_names() -> dict:
 
 
 @mcp.tool()
+def find_secret_by_id(secret_id: str) -> dict:
+    """Look up a secret's key name (and value) by its BWS secret UUID.
+
+    For resolving legacy `pre_deploy` scripts that reference secrets by
+    raw UUID into the name-based `secrets.toml` manifest format.
+    """
+    secrets = _all_secrets()
+    if secrets is None:
+        return {"error": "Failed to list secrets from BWS."}
+    for s in secrets:
+        if s.get("id") == secret_id:
+            return {"key": s["key"], "value": s["value"], "id": secret_id}
+    return {"error": f"Secret id '{secret_id}' not found."}
+
+
+@mcp.tool()
 def create_secret(key: str, value: str, note: str = "") -> dict:
     """Create a new secret in BWS."""
     if not _BWS_PROJECT_ID:
