@@ -695,16 +695,17 @@ def app_status(
     """
     if app_type == "stateless":
         rc, stdout, _ = _run([
-            "kubectl", "get", "applications", name, "-n", "default",
-            "-o", "jsonpath={.status.sync.status},{.status.health.status}",
+            "kubectl", "get", "applications.argoproj.io", name, "-n", "argocd",
+            "-o", "jsonpath={.status.sync.status},{.status.health.status},{.spec.destination.namespace}",
         ])
-        pods_rc, pods_out, _ = _run(["kubectl", "get", "pods", "-n", name, "--no-headers"])
-        sync, health = ("unknown", "unknown")
+        sync, health, namespace = "unknown", "unknown", name
         if rc == 0 and stdout:
             parts = stdout.split(",")
-            sync = parts[0] if parts else "unknown"
-            health = parts[1] if len(parts) > 1 else "unknown"
-        return {"app": name, "sync": sync, "health": health, "pods": pods_out.strip()}
+            sync = parts[0] or "unknown"
+            health = parts[1] if len(parts) > 1 and parts[1] else "unknown"
+            namespace = parts[2] if len(parts) > 2 and parts[2] else name
+        _, pods_out, _ = _run(["kubectl", "get", "pods", "-n", namespace, "--no-headers"])
+        return {"app": name, "sync": sync, "health": health, "namespace": namespace, "pods": pods_out.strip()}
 
     komodo_url = os.environ.get("KOMODO_URL", "https://komodo.amer.dev")
     komodo_key = os.environ.get("KOMODO_API_KEY", "")
