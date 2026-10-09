@@ -47,7 +47,10 @@ class Kube:
 
     def pod_log(self, namespace, name, container=None, tail=200):
         try:
-            return self.core.read_namespaced_pod_log(name, namespace, container=container, tail_lines=tail)
+            # raw body: the client otherwise turns a log that is valid JSON into a dict and returns its repr
+            resp = self.core.read_namespaced_pod_log(name, namespace, container=container, tail_lines=tail,
+                                                     _preload_content=False)
+            return resp.data.decode("utf-8", "replace")
         except ApiException as e:
             if e.status in (400, 404):
                 return ""
