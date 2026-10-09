@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "model-switch-mcp"
+version = "0.1.0"
+description = "MCP server that switches a GPU runner between its default model and benchmark models using Kubernetes Jobs"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp==3.4.2",
+    "kubernetes==36.0.1",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+model-switch-mcp = "model_switch_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/model_switch_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs a cluster and a deployed MCP, skipped unless MSM_INTEGRATION=1"]

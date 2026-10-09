@@ -1,0 +1,43 @@
+# One entry per runner. Only murderbot is implemented.
+runners:
+  murderbot:
+    kind: k8s-gpu
+    namespace: llm-bench
+    node: murderbot
+    gpuResource: nvidia.com/gpu
+    runtimeClassName: nvidia
+    priorityClassName: llmkube-high
+    weightsPvc: llm-bench-weights
+    defaultModel: {namespace: llm, inferenceService: qwen38-27b-uncensored}
+    vramBytes: 25655508992
+    vramReserveBytes: 1610612736
+    evictAboveGiB: 300
+    lease: {defaultMinutes: 30, maxMinutes: 120}
+    startup: {defaultMinutes: 10, maxMinutes: 20}
+    finishedJobTtlSeconds: 300
+    serve: {cpu: "4", memory: 28Gi}
+    stage:
+      image: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+      scriptConfigMap: llm-bench-stage-script
+      hfTokenSecret: hf-token
+      cpu: "2"
+      memory: 4Gi
+      deadlineMinutes: 240
+    engines:
+      ninfer:
+        image: ghcr.io/dean-amer-dev/murderbot-llm@sha256:6ee1e235b1361f2b00eec09f72f1dd5157f01c917cb36ad35c50238f4ab2d222
+        mode: args
+        fixedArgs: ["--host", "0.0.0.0", "--port", "8080"]
+        health: {path: /health, port: 8080}
+        supportedContainerVersions: [2]
+      llamacpp:
+        image: ghcr.io/ggml-org/llama.cpp@sha256:6869e4456217802e5372774be236a9aa93666cfb7f033b7d39cd58b178af6489
+        mode: command
+        command: ["/app/llama-server"]
+        fixedArgs: ["--host", "0.0.0.0", "--port", "8080", "-ngl", "999"]
+        health: {path: /health, port: 8080}
+      ollama:
+        image: docker.io/ollama/ollama@sha256:b86366bb528bbf7f1424435d165028497a5b69bf6ddb4fa5a87102e2b79f44fb
+        mode: env
+        env: {OLLAMA_HOST: "0.0.0.0:8080", OLLAMA_MODELS: /weights/ollama, OLLAMA_KEEP_ALIVE: "-1"}
+        health: {path: /, port: 8080}
