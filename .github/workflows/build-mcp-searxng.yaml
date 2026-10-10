@@ -20,7 +20,7 @@ env:
 jobs:
   set-tag:
     if: github.event_name != 'pull_request'
-    runs-on: arc-runner-dean-mcp
+    runs-on: arc-runner-set
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -31,7 +31,7 @@ jobs:
   build:
     needs: set-tag
     if: github.event_name != 'pull_request'
-    runs-on: arc-runner-dean-mcp
+    runs-on: arc-runner-set
     outputs:
       tag: ${{ needs.set-tag.outputs.tag }}
     steps:
@@ -60,7 +60,7 @@ jobs:
     if: |
       always() &&
       needs.build.result == 'success'
-    runs-on: arc-runner-dean-mcp
+    runs-on: arc-runner-set
     steps:
       - uses: actions/checkout@v4
       - name: Generate GitHub App token
