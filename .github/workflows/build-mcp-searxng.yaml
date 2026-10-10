@@ -14,116 +14,40 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE: amerenda/mcp-searxng
-  GITOPS_REPO: amerenda/k3s-dean-gitops
+  IMAGE: ghcr.io/dean-amer-dev/mcp-searxng
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
-  set-tag:
-    if: github.event_name != 'pull_request'
-    runs-on: arc-runner-set
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
-    steps:
-      - name: Set image tag
-        id: tag
-        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-
   build:
-    needs: set-tag
-    if: github.event_name != 'pull_request'
     runs-on: arc-runner-set
-    outputs:
-      tag: ${{ needs.set-tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
+      - name: Set up Docker Buildx (in-pod BuildKit)
         uses: docker/setup-buildx-action@v3
-      - name: Login to Docker Hub
-        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-      - name: Build and push (multi-arch)
+        with:
+          driver: remote
+          endpoint: unix:///run/buildkit/buildkitd.sock
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: ./mcp-searxng
-          file: ./mcp-searxng/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ needs.set-tag.outputs.tag }}
-            ${{ env.IMAGE }}:latest
-          cache-from: type=gha,scope=mcp-searxng
-          cache-to: type=gha,mode=max,scope=mcp-searxng
-
-  deploy:
-    needs: [build]
-    if: |
-      always() &&
-      needs.build.result == 'success'
-    runs-on: arc-runner-set
-    steps:
-      - uses: actions/checkout@v4
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.CODER_APP_ID }}
-          private-key: ${{ secrets.CODER_APP_PRIVATE_KEY }}
-          repositories: k3s-dean-gitops
-      - name: Create deploy PR
-        env:
-          TAG: ${{ needs.build.outputs.tag }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          set -euo pipefail
-          rm -rf /tmp/gitops
-          git clone https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git /tmp/gitops
-          cd /tmp/gitops
-
-          APP_NAME="mcp-searxng"
-
-          EXISTING_PRS=$(curl -sf \
-            -H "Authorization: token ${GH_TOKEN}" \
-            "https://api.github.com/repos/${GITOPS_REPO}/pulls?state=open&per_page=100" \
-            | python3 -c "
-          import json,sys
-          for pr in json.load(sys.stdin):
-              ref = pr.get('head',{}).get('ref','')
-              if ref.startswith('deploy/${APP_NAME}-'):
-                  print(pr['number'])
-          " 2>/dev/null || true)
-          for PR_NUM in $EXISTING_PRS; do
-            curl -sf -X PATCH \
-              -H "Authorization: token ${GH_TOKEN}" \
-              "https://api.github.com/repos/${GITOPS_REPO}/pulls/${PR_NUM}" \
-              -d '{"state":"closed"}' > /dev/null
-          done
-
-          BRANCH="deploy/${APP_NAME}-${TAG}"
-          git checkout -b "${BRANCH}"
-
-          sed -i "s|amerenda/${APP_NAME}:[^ ]*|amerenda/${APP_NAME}:${TAG}|g" \
-            apps/mcp-searxng/server/deployment.yaml
-
-          git config user.name "amerenda-coder[bot]"
-          git config user.email "amerenda-coder[bot]@users.noreply.github.com"
-          git add -A
-          git diff --cached --quiet && exit 0
-          git commit -m "deploy: ${APP_NAME} ${TAG}"
-          git push origin "${BRANCH}"
-
-          COMMIT_MSG=$(git -C "${GITHUB_WORKSPACE}" log -1 --format='%s' 2>/dev/null || echo "")
-          NL=$'\n'
-          PR_BODY="**${APP_NAME} ${TAG}** (multi-arch: amd64+arm64)${NL}${NL}${COMMIT_MSG}${NL}${NL}Source: https://github.com/amerenda/dean-mcp/commit/${GITHUB_SHA}"
-
-          curl -sf -X POST \
-            -H "Authorization: token ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
-            -d "$(jq -n \
-              --arg title "deploy: ${APP_NAME} ${TAG}" \
-              --arg body "${PR_BODY}" \
-              --arg head "${BRANCH}" \
-              --arg base "main" \
-              '{title: $title, body: $body, head: $head, base: $base}')"
-
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          tags: ${{ env.IMAGE }}:sha-${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE) || '' }}
+      - name: Record digest
+        if: github.event_name != 'pull_request'
+        run: echo "${IMAGE}:sha-${GITHUB_SHA}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
