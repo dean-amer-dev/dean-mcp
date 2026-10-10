@@ -29,6 +29,8 @@ _CACHE_MAX = 50
 EMBED_URL = os.environ.get("EMBED_URL", "http://modernbert-embed-mini.llm.svc.cluster.local:8080/v1/embeddings")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomicai-modernbert-embed-base-8bit")
 _CHUNK_WORDS = 220  # about 300 tokens
+_MAX_PAGE_CHARS = 300_000
+_MAX_CHUNKS_PER_PAGE = 8
 
 _KIND_ENGINES = {
     "web": "bing,yandex,wikipedia",
@@ -261,7 +263,7 @@ def read_url(
 
 def _chunks(text: str) -> list[str]:
     words = text.split()
-    return [" ".join(words[i : i + _CHUNK_WORDS]) for i in range(0, len(words), _CHUNK_WORDS)]
+    return [" ".join(words[i : i + _CHUNK_WORDS]) for i in range(0, min(len(words), _CHUNK_WORDS * _MAX_CHUNKS_PER_PAGE), _CHUNK_WORDS)]
 
 
 def _fetch_text(url: str) -> str:
@@ -273,7 +275,9 @@ def _fetch_text(url: str) -> str:
             headers={"User-Agent": "Mozilla/5.0 (compatible; mcp-searxng/1.0)"},
         )
         resp.raise_for_status()
-        return _to_markdown(resp.text)
+        if "html" not in resp.headers.get("content-type", "html"):
+            return ""
+        return _to_markdown(resp.text[:_MAX_PAGE_CHARS])
     except Exception:
         return ""
 
