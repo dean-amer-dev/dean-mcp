@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import time
+from typing import Literal
 from urllib.parse import urlparse
 
 import html2text as _h2t
 import httpx
+import trafilatura
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -21,6 +23,17 @@ _MAX_URL_CHARS = int(os.environ.get("MAX_URL_CONTENT_CHARS", "4000"))
 _url_cache: dict[str, tuple[float, str]] = {}
 _CACHE_TTL = 300  # 5 minutes
 _CACHE_MAX = 50
+
+_KIND_ENGINES = {
+    "web": "bing,yandex,wikipedia",
+    "code": "github,stackoverflow,hackernews",
+    "papers": "arxiv,google scholar,semantic scholar",
+}
+_PER_DOMAIN = 2
+
+# In-memory search cache: (query, kind) -> (fetched_at, result)
+_search_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+_SEARCH_TTL = 600  # 10 minutes
 
 mcp = FastMCP(
     "mcp-searxng",
@@ -40,9 +53,13 @@ async def health(request: Request) -> JSONResponse:
 
 def _get_domain(url: str) -> str:
     try:
-        return urlparse(url).netloc
+        parsed = urlparse(url)
     except Exception:
         return url
+    if parsed.netloc == "github.com":
+        # one site hosts every repo, so cap per repo instead
+        return "github.com/" + "/".join(parsed.path.strip("/").split("/")[:2])
+    return parsed.netloc
 
 
 def _cache_get(url: str) -> str | None:
@@ -63,27 +80,28 @@ def _cache_set(url: str, markdown: str) -> None:
 def search(
     query: str,
     max_results: int = _MAX_RESULTS,
-    engines: str | None = None,
+    kind: Literal["web", "code", "papers"] = "web",
 ) -> dict:
-    """Search the web and return scored, deduplicated results.
+    """Search the web and return scored results, at most 2 per domain.
 
-    Results are ranked by relevance score and deduplicated by domain — you won't
-    get three StackOverflow links eating your context. Only the top result per
-    domain is kept.
-
-    For code/library questions, pass engines='stackoverflow,github' to skip
-    general web noise. Omit engines to use the instance defaults (Google +
-    GitHub + StackOverflow).
+    Use short keyword queries (e.g. 'llama.cpp speculative decoding'), not
+    full sentences; sentences return junk.
 
     Args:
-        query: Search query.
+        query: Short keyword query.
         max_results: Max results to return (default 5, max 10).
-        engines: Comma-separated engine names, e.g. 'google' or 'stackoverflow,github'.
+        kind: 'web' searches Bing, Yandex and Wikipedia; 'code' searches
+              GitHub, StackOverflow and Hacker News; 'papers' searches arXiv,
+              Google Scholar and Semantic Scholar.
     """
     max_results = min(max_results, 10)
-    params: dict[str, str | int] = {"q": query, "format": "json"}
-    if engines:
-        params["engines"] = engines
+    if kind not in _KIND_ENGINES:
+        return {"error": f"kind must be one of {sorted(_KIND_ENGINES)}"}
+    cache_key = (query, kind)
+    entry = _search_cache.get(cache_key)
+    if entry and (time.monotonic() - entry[0]) < _SEARCH_TTL:
+        return _format(query, entry[1][:max_results])
+    params: dict[str, str | int] = {"q": query, "format": "json", "engines": _KIND_ENGINES[kind]}
 
     try:
         resp = httpx.get(
@@ -101,17 +119,26 @@ def search(
     if not raw:
         return {"count": 0, "query": query, "formatted": f"No results for: {query}"}
 
-    # Deduplicate by domain, keeping the highest-scoring result per domain
-    by_domain: dict[str, dict] = {}
-    for r in raw:
+    # Keep the best _PER_DOMAIN results per domain, ranked by score
+    ranked_all = sorted(raw, key=lambda r: r.get("score") or 0, reverse=True)
+    per_domain: dict[str, int] = {}
+    ranked: list[dict] = []
+    for r in ranked_all:
         domain = _get_domain(r.get("url", ""))
-        score = r.get("score") or 0
-        if domain not in by_domain or score > (by_domain[domain].get("score") or 0):
-            by_domain[domain] = r
+        if per_domain.get(domain, 0) >= _PER_DOMAIN:
+            continue
+        per_domain[domain] = per_domain.get(domain, 0) + 1
+        ranked.append(r)
+        if len(ranked) >= 10:
+            break
 
-    # Sort by score descending, take top N
-    ranked = sorted(by_domain.values(), key=lambda r: r.get("score") or 0, reverse=True)[:max_results]
+    if len(_search_cache) >= _CACHE_MAX:
+        del _search_cache[min(_search_cache, key=lambda k: _search_cache[k][0])]
+    _search_cache[cache_key] = (time.monotonic(), ranked)
+    return _format(query, ranked[:max_results])
 
+
+def _format(query: str, ranked: list[dict]) -> dict:
     lines = []
     for i, r in enumerate(ranked, 1):
         score = r.get("score") or 0
@@ -129,6 +156,9 @@ def search(
 
 
 def _to_markdown(html: str) -> str:
+    extracted = trafilatura.extract(html, output_format="markdown")
+    if extracted:
+        return extracted
     converter = _h2t.HTML2Text()
     converter.ignore_images = True
     converter.ignore_links = False
