@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 import time
 from typing import Literal
 from urllib.parse import urlparse
@@ -23,6 +25,10 @@ _MAX_URL_CHARS = int(os.environ.get("MAX_URL_CONTENT_CHARS", "4000"))
 _url_cache: dict[str, tuple[float, str]] = {}
 _CACHE_TTL = 300  # 5 minutes
 _CACHE_MAX = 50
+
+EMBED_URL = os.environ.get("EMBED_URL", "http://modernbert-embed-mini.llm.svc.cluster.local:8080/v1/embeddings")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomicai-modernbert-embed-base-8bit")
+_CHUNK_WORDS = 220  # about 300 tokens
 
 _KIND_ENGINES = {
     "web": "bing,yandex,wikipedia",
@@ -251,6 +257,80 @@ def read_url(
     if truncated:
         content += f"\n\n…[truncated at {max_chars} chars, full length: {len(markdown)}. Use read_headings=True to navigate.]"
     return {"url": url, "content": content, "truncated": truncated}
+
+
+def _chunks(text: str) -> list[str]:
+    words = text.split()
+    return [" ".join(words[i : i + _CHUNK_WORDS]) for i in range(0, len(words), _CHUNK_WORDS)]
+
+
+def _fetch_text(url: str) -> str:
+    try:
+        resp = httpx.get(
+            url,
+            timeout=5,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; mcp-searxng/1.0)"},
+        )
+        resp.raise_for_status()
+        return _to_markdown(resp.text)
+    except Exception:
+        return ""
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+@mcp.tool()
+def search_deep(query: str, kind: Literal["web", "code", "papers"] = "web") -> dict:
+    """Search, fetch the top 10 pages, and return the 5 passages most relevant to the query.
+
+    Slower than search (fetches pages) but returns answer-bearing passages
+    instead of snippets. Use short keyword queries. If the embedding service
+    is down, falls back to search order.
+
+    Args:
+        query: Short keyword query.
+        kind: 'web', 'code' or 'papers', as for search.
+    """
+    found = search(query, max_results=10, kind=kind)
+    if "error" in found or not found.get("results"):
+        return found
+    urls = [r["url"] for r in found["results"] if r.get("url")]
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        texts = list(pool.map(_fetch_text, urls))
+
+    items: list[tuple[str, str]] = []  # (url, chunk)
+    for url, text in zip(urls, texts):
+        for chunk in _chunks(text):
+            items.append((url, chunk))
+    if not items:
+        return {**found, "note": "no page content could be fetched; returning search order"}
+
+    try:
+        resp = httpx.post(
+            EMBED_URL,
+            json={"model": EMBED_MODEL, "input": [query] + [c for _, c in items]},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        vectors = [d["embedding"] for d in sorted(resp.json()["data"], key=lambda d: d["index"])]
+        qv, cvs = vectors[0], vectors[1:]
+        scored = sorted(
+            ((_cosine(qv, v), url, chunk) for (url, chunk), v in zip(items, cvs)),
+            key=lambda t: t[0],
+            reverse=True,
+        )[:5]
+    except Exception as e:
+        return {**found, "note": f"embedding failed ({e}); returning search order"}
+
+    passages = [{"url": u, "score": round(sc, 4), "text": c} for sc, u, c in scored]
+    formatted = "\n\n".join(f"[{i}] {p['url']}\n{p['text']}" for i, p in enumerate(passages, 1))
+    return {"query": query, "count": len(passages), "passages": passages, "formatted": formatted}
 
 
 if __name__ == "__main__":
